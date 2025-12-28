@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Layer 7 Monitor - Real-time Traffic Dashboard</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <h1 class="logo">
+          <span class="logo-icon">🛡️</span>
+          Layer 7 Monitor
+        </h1>
+        <div class="connection-status" id="connectionStatus">
+          <span class="status-dot"></span>
+          <span class="status-text">Connecting...</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="stat-badge">
+          <span class="badge-label">Total Requests</span>
+          <span class="badge-value" id="totalRequests">0</span>
+        </div>
+        <div class="stat-badge">
+          <span class="badge-label">RPS</span>
+          <span class="badge-value accent" id="currentRPS">0</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Grid -->
+    <div class="dashboard-grid">
+      <!-- Traffic Overview Chart -->
+      <div class="card card-wide">
+        <div class="card-header">
+          <h2 class="card-title">Traffic Overview</h2>
+          <div class="card-stats">
+            <span class="stat-item">
+              <span class="stat-label">Peak:</span>
+              <span class="stat-value" id="peakRPS">0 RPS</span>
+            </span>
+          </div>
+        </div>
+        <div class="chart-container">
+          <div id="trafficChart" class="chart"></div>
+        </div>
+      </div>
+
+      <!-- Processor Usage Chart -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Processor Usage</h2>
+          <span class="stat-value accent" id="cpuUsage">0%</span>
+        </div>
+        <div class="chart-container">
+          <div id="cpuChart" class="chart chart-small"></div>
+        </div>
+      </div>
+
+      <!-- Memory Usage Chart -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Memory Usage</h2>
+          <span class="stat-value accent" id="memoryUsage">0%</span>
+        </div>
+        <div class="chart-container">
+          <div id="memoryChart" class="chart chart-small"></div>
+        </div>
+      </div>
+
+      <!-- Connections Chart -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Connections</h2>
+          <div class="card-stats">
+            <span class="stat-item">
+              <span class="stat-label">Active:</span>
+              <span class="stat-value" id="activeConnections">0</span>
+            </span>
+          </div>
+        </div>
+        <div class="chart-container">
+          <div id="connectionsChart" class="chart chart-small"></div>
+        </div>
+      </div>
+
+      <!-- Request Stats -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Request Statistics</h2>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-box-label">Allowed</div>
+            <div class="stat-box-value success" id="allowedRequests">0</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-box-label">Blocked</div>
+            <div class="stat-box-value danger" id="blockedRequests">0</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-box-label">Avg Response</div>
+            <div class="stat-box-value" id="avgResponse">0ms</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-box-label">P95 Response</div>
+            <div class="stat-box-value" id="p95Response">0ms</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Top IPs -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Top Source IPs</h2>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="topIPsTable">
+            <thead>
+              <tr>
+                <th>IP Address</th>
+                <th>Requests</th>
+              </tr>
+            </thead>
+            <tbody id="topIPsBody">
+              <tr>
+                <td colspan="2" class="no-data">No data yet...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Top Endpoints -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">Top Endpoints</h2>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="endpointsTable">
+            <thead>
+              <tr>
+                <th>Path</th>
+                <th>Hits</th>
+              </tr>
+            </thead>
+            <tbody id="endpointsBody">
+              <tr>
+                <td colspan="2" class="no-data">No data yet...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/charts.js"></script>
+  <script src="/js/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: layer7-monitor
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PORT=3000
+      - METRICS_UPDATE_INTERVAL=500
+    depends_on:
+      - redis
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+
+  redis:
+    image: redis:7-alpine
+    container_name: layer7-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+  # Optional: Traffic simulator for testing
+  demo:
+    build: .
+    container_name: layer7-demo
+    environment:
+      - TARGET_URL=http://app:3000
+    depends_on:
+      - app
+    command: node demo/trafficSimulator.js
+    profiles:
+      - demo
+
+volumes:
+  redis-data:

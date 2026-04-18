@@ -11,7 +11,7 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 ETC_DIR="/etc/smurf"
 TLS_DIR="${ETC_DIR}/tls"
 DATA_DIR="/var/lib/smurf"
-BIN_DIR="/opt/smurf/bin"
+BIN_DIR="/usr/local/bin"
 SYSTEMD_DIR="/etc/systemd/system"
 SERVICE_NAME="smurfd.service"
 
@@ -25,6 +25,18 @@ apt-get install -y --no-install-recommends \
   golang-go \
   openssl \
   sqlite3
+
+if ! getent group smurf >/dev/null 2>&1; then
+  groupadd --system smurf
+fi
+if ! id -u smurf >/dev/null 2>&1; then
+  useradd --system \
+    --gid smurf \
+    --home-dir "${DATA_DIR}" \
+    --create-home \
+    --shell /usr/sbin/nologin \
+    smurf
+fi
 
 mkdir -p "${BUILD_DIR}" "${TLS_DIR}" "${DATA_DIR}" "${BIN_DIR}"
 
@@ -40,9 +52,9 @@ if [[ ! -f "${TLS_DIR}/server.crt" || ! -f "${TLS_DIR}/server.key" ]]; then
     -out "${TLS_DIR}/server.crt" \
     -days 3650 \
     -subj "/CN=smurf.local"
-  chmod 600 "${TLS_DIR}/server.key"
-  chmod 644 "${TLS_DIR}/server.crt"
 fi
+chown root:smurf "${TLS_DIR}/server.key" "${TLS_DIR}/server.crt"
+chmod 640 "${TLS_DIR}/server.key" "${TLS_DIR}/server.crt"
 
 if [[ ! -f "${ETC_DIR}/smurf.json" ]]; then
   cat > "${ETC_DIR}/smurf.json" <<'JSON'
@@ -86,6 +98,10 @@ if [[ ! -f "${ETC_DIR}/smurf.json" ]]; then
 JSON
   chmod 640 "${ETC_DIR}/smurf.json"
 fi
+chown root:smurf "${ETC_DIR}/smurf.json"
+chmod 640 "${ETC_DIR}/smurf.json"
+chmod 750 "${ETC_DIR}" "${TLS_DIR}"
+chown -R smurf:smurf "${DATA_DIR}"
 
 install -m 0644 "${SCRIPT_DIR}/deploy/systemd/smurfd.service" "${SYSTEMD_DIR}/${SERVICE_NAME}"
 

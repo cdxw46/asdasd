@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import struct
 import sys
 from pathlib import Path
 
@@ -76,4 +77,72 @@ def test_create_session_rejects_invalid_peer(tmp_path: Path):
     )
     assert result["ok"] is False
     assert "rtp_port must be numeric" in result["error"]
+    service.udp_socket.close()
+
+
+def test_recording_accepts_symmetric_rtp_port_rebinding(tmp_path: Path):
+    service = _service(tmp_path)
+    call_id = "call-media-symmetric"
+    create_result = asyncio.run(
+        service._handle_command(
+            {
+                "action": "create_session",
+                "call_id": call_id,
+                "peer_a": {"ip": "127.0.0.1", "rtp_port": 34010},
+                "peer_b": {"ip": "127.0.0.1", "rtp_port": 34012},
+                "record": True,
+            }
+        )
+    )
+    assert create_result["ok"] is True
+
+    packet = struct.pack("!BBHII", 0x80, 0, 1, 160, 0x12345678) + (b"\x00" * 160)
+    asyncio.run(service._handle_rtp_packet(packet, ("127.0.0.1", 34999)))
+    asyncio.run(service._handle_command({"action": "end_session", "call_id": call_id}))
+
+    recording_path = tmp_path / "recordings" / f"{call_id}.rtp"
+    assert recording_path.exists()
+    assert recording_path.stat().st_size > 0
+    assert service.endpoint_index == {}
+    service.udp_socket.close()
+
+
+def test_unknown_source_port_ignored_when_multiple_calls_share_ip(tmp_path: Path):
+    service = _service(tmp_path)
+    first = asyncio.run(
+        service._handle_command(
+            {
+                "action": "create_session",
+                "call_id": "call-media-1",
+                "peer_a": {"ip": "127.0.0.1", "rtp_port": 34020},
+                "peer_b": {"ip": "127.0.0.1", "rtp_port": 34022},
+                "record": True,
+            }
+        )
+    )
+    second = asyncio.run(
+        service._handle_command(
+            {
+                "action": "create_session",
+                "call_id": "call-media-2",
+                "peer_a": {"ip": "127.0.0.1", "rtp_port": 34024},
+                "peer_b": {"ip": "127.0.0.1", "rtp_port": 34026},
+                "record": True,
+            }
+        )
+    )
+    assert first["ok"] is True
+    assert second["ok"] is True
+
+    packet = struct.pack("!BBHII", 0x80, 0, 2, 320, 0x22334455) + (b"\x01" * 120)
+    asyncio.run(service._handle_rtp_packet(packet, ("127.0.0.1", 34998)))
+    assert ("127.0.0.1", 34998) not in service.endpoint_index
+
+    asyncio.run(service._handle_command({"action": "end_session", "call_id": "call-media-1"}))
+    asyncio.run(service._handle_command({"action": "end_session", "call_id": "call-media-2"}))
+
+    first_path = tmp_path / "recordings" / "call-media-1.rtp"
+    second_path = tmp_path / "recordings" / "call-media-2.rtp"
+    assert first_path.exists() and first_path.stat().st_size == 0
+    assert second_path.exists() and second_path.stat().st_size == 0
     service.udp_socket.close()

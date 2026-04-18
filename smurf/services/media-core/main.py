@@ -114,6 +114,7 @@ class MediaCoreService:
         self.shutdown_event = asyncio.Event()
         self.sessions: dict[str, RTPSession] = {}
         self.endpoint_index: dict[tuple[str, int], tuple[str, str]] = {}
+        self.session_endpoints: dict[str, set[tuple[str, int]]] = {}
         self.port_pool = list(range(self.config.rtp.min_port, self.config.rtp.max_port, 2))
         random.shuffle(self.port_pool)
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -169,6 +170,7 @@ class MediaCoreService:
             except Exception:  # noqa: BLE001
                 pass
         self.recording_handles.clear()
+        self.session_endpoints.clear()
         self.udp_socket.close()
 
     async def _rtp_loop(self):
@@ -190,13 +192,18 @@ class MediaCoreService:
         pt, seq, ts, _ssrc, header_len = parsed
         source_ip, source_port = addr
         now = time.time()
-        mapping = self.endpoint_index.get((source_ip, source_port))
+        mapping = self._resolve_packet_mapping(source_ip, source_port)
         if not mapping:
             return
         call_id, direction = mapping
         session = self.sessions.get(call_id)
         if not session:
             self.endpoint_index.pop((source_ip, source_port), None)
+            tracked = self.session_endpoints.get(call_id)
+            if tracked:
+                tracked.discard((source_ip, source_port))
+                if not tracked:
+                    self.session_endpoints.pop(call_id, None)
             return
         if direction == "a_to_b":
             self._update_stats(session.stats_a_to_b, seq, ts, len(packet), now, session.sample_rate)
@@ -277,6 +284,78 @@ class MediaCoreService:
             handle.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def _remember_endpoint(self, call_id: str, endpoint: tuple[str, int], direction: str) -> None:
+        self.endpoint_index[endpoint] = (call_id, direction)
+        self.session_endpoints.setdefault(call_id, set()).add(endpoint)
+
+    def _drop_session_endpoints(self, call_id: str) -> None:
+        for endpoint in self.session_endpoints.pop(call_id, set()):
+            self.endpoint_index.pop(endpoint, None)
+
+    def _resolve_packet_mapping(
+        self,
+        source_ip: str,
+        source_port: int,
+    ) -> tuple[str, str] | None:
+        endpoint = (source_ip, source_port)
+        mapping = self.endpoint_index.get(endpoint)
+        if mapping:
+            return mapping
+
+        candidates: list[tuple[str, str, int, int]] = []
+        for call_id, session in self.sessions.items():
+            if session.peer_a.ip == source_ip:
+                candidates.append(
+                    (
+                        call_id,
+                        "a_to_b",
+                        session.peer_a.rtp_port,
+                        session.stats_a_to_b.packets,
+                    )
+                )
+            if session.peer_b.ip == source_ip:
+                candidates.append(
+                    (
+                        call_id,
+                        "b_to_a",
+                        session.peer_b.rtp_port,
+                        session.stats_b_to_a.packets,
+                    )
+                )
+        if not candidates:
+            return None
+
+        exact_port_matches = [candidate for candidate in candidates if candidate[2] == source_port]
+        if len(exact_port_matches) == 1:
+            call_id, direction, _port, _packets = exact_port_matches[0]
+            self._remember_endpoint(call_id, endpoint, direction)
+            return (call_id, direction)
+        if len(exact_port_matches) > 1:
+            # Multiple calls advertising exactly same endpoint is ambiguous.
+            return None
+
+        call_ids = {candidate[0] for candidate in candidates}
+        if len(call_ids) > 1:
+            return None
+
+        min_packets = min(candidate[3] for candidate in candidates)
+        least_used = [candidate for candidate in candidates if candidate[3] == min_packets]
+        chosen = sorted(least_used, key=lambda item: (item[1], item[2]))[0]
+        call_id, direction, _port, _packets = chosen
+        self._remember_endpoint(call_id, endpoint, direction)
+        LOGGER.info(
+            "learned-symmetric-rtp-endpoint",
+            extra={
+                "extra": {
+                    "call_id": call_id,
+                    "direction": direction,
+                    "source_ip": source_ip,
+                    "source_port": source_port,
+                }
+            },
+        )
+        return (call_id, direction)
 
     def _parse_peer(self, payload: dict[str, Any], key: str) -> RTPPeer:
         peer = payload.get(key, {})
@@ -370,13 +449,11 @@ class MediaCoreService:
                 recording_path.touch(exist_ok=True)
 
             self.sessions[call_id] = session
-            self.endpoint_index[(session.peer_a.ip, session.peer_a.rtp_port)] = (
-                call_id,
-                "a_to_b",
+            self._remember_endpoint(
+                call_id, (session.peer_a.ip, session.peer_a.rtp_port), "a_to_b"
             )
-            self.endpoint_index[(session.peer_b.ip, session.peer_b.rtp_port)] = (
-                call_id,
-                "b_to_a",
+            self._remember_endpoint(
+                call_id, (session.peer_b.ip, session.peer_b.rtp_port), "b_to_a"
             )
             started_at = int(time.time())
             self.db.execute(
@@ -410,8 +487,7 @@ class MediaCoreService:
             session = self.sessions.pop(call_id, None)
             if not session:
                 return {"ok": False, "error": "session_not_found"}
-            self.endpoint_index.pop((session.peer_a.ip, session.peer_a.rtp_port), None)
-            self.endpoint_index.pop((session.peer_b.ip, session.peer_b.rtp_port), None)
+            self._drop_session_endpoints(call_id)
             ended_at = int(time.time())
             self.db.execute(
                 "UPDATE rtp_sessions SET ended_at = ? WHERE call_id = ?",

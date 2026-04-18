@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SMURF PBX</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f172a;
+      --card: #111827;
+      --muted: #94a3b8;
+      --fg: #e2e8f0;
+      --accent: #22c55e;
+      --danger: #ef4444;
+      --border: #1f2937;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      background: linear-gradient(180deg, #020617, #0f172a);
+      color: var(--fg);
+    }
+    header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    main {
+      padding: 24px;
+      display: grid;
+      gap: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+    .card {
+      background: rgba(17, 24, 39, 0.95);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
+    h1, h2 { margin: 0 0 12px 0; }
+    .muted { color: var(--muted); }
+    .row { display: flex; gap: 8px; margin-bottom: 10px; }
+    input, button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #334155;
+      background: #0b1220;
+      color: var(--fg);
+    }
+    button {
+      cursor: pointer;
+      background: #1d4ed8;
+      border-color: #1d4ed8;
+      font-weight: 600;
+    }
+    button.secondary { background: #111827; border-color: #475569; }
+    button.danger { background: #7f1d1d; border-color: #991b1b; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--border); }
+    .kpi { font-size: 28px; font-weight: 700; }
+    .ok { color: var(--accent); }
+    .error { color: var(--danger); }
+    pre {
+      margin: 0;
+      background: #020617;
+      border-radius: 10px;
+      padding: 12px;
+      overflow: auto;
+      max-height: 240px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>SMURF PBX</h1>
+      <div class="muted">Admin panel and real-time status</div>
+    </div>
+    <div id="sessionStatus" class="muted">Not authenticated</div>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Login</h2>
+      <div class="row"><input id="username" placeholder="Username" value="admin"></div>
+      <div class="row"><input id="password" placeholder="Password" type="password" value="admin123!"></div>
+      <div class="row">
+        <button onclick="login()">Login</button>
+        <button class="secondary" onclick="logout()">Logout</button>
+      </div>
+      <div id="loginMessage" class="muted"></div>
+    </section>
+
+    <section class="card">
+      <h2>KPIs</h2>
+      <div class="row"><div><div class="kpi" id="kpiExt">-</div><div class="muted">Extensions</div></div></div>
+      <div class="row"><div><div class="kpi" id="kpiReg">-</div><div class="muted">Registrations</div></div></div>
+      <div class="row"><div><div class="kpi" id="kpiCalls">-</div><div class="muted">Active calls</div></div></div>
+    </section>
+
+    <section class="card">
+      <h2>Create extension</h2>
+      <div class="row"><input id="newNumber" placeholder="Extension number"></div>
+      <div class="row"><input id="newName" placeholder="Display name"></div>
+      <div class="row"><input id="newPassword" placeholder="SIP password"></div>
+      <div class="row"><button onclick="createExtension()">Create</button></div>
+      <div id="extMessage" class="muted"></div>
+    </section>
+
+    <section class="card" style="grid-column: span 2;">
+      <h2>Extensions</h2>
+      <table>
+        <thead><tr><th>Number</th><th>Name</th><th>Max calls</th><th>Voicemail PIN</th></tr></thead>
+        <tbody id="extensionsBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card" style="grid-column: span 2;">
+      <h2>Registrations</h2>
+      <table>
+        <thead><tr><th>Extension</th><th>Contact</th><th>Source</th><th>Transport</th><th>Expires</th></tr></thead>
+        <tbody id="registrationsBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card" style="grid-column: span 2;">
+      <h2>Call detail records</h2>
+      <table>
+        <thead><tr><th>Call-ID</th><th>From</th><th>To</th><th>Status</th><th>Duration</th></tr></thead>
+        <tbody id="cdrBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card" style="grid-column: span 2;">
+      <h2>Snapshot</h2>
+      <pre id="snapshot">Loading...</pre>
+    </section>
+  </main>
+
+  <script>
+    let token = localStorage.getItem("smurfToken") || "";
+
+    function authHeaders() {
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+
+    function setMessage(id, text, isError = false) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = isError ? "error" : "muted";
+    }
+
+    async function request(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+          ...(options.headers || {})
+        }
+      });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data;
+    }
+
+    async function login() {
+      try {
+        const data = await request("/api/login", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value
+          })
+        });
+        token = data.token;
+        localStorage.setItem("smurfToken", token);
+        setMessage("loginMessage", "Authenticated");
+        refresh();
+      } catch (err) {
+        setMessage("loginMessage", err.message, true);
+      }
+    }
+
+    function logout() {
+      token = "";
+      localStorage.removeItem("smurfToken");
+      setMessage("loginMessage", "Logged out");
+      refresh();
+    }
+
+    async function createExtension() {
+      try {
+        const data = await request("/api/extensions", {
+          method: "POST",
+          body: JSON.stringify({
+            number: document.getElementById("newNumber").value,
+            display_name: document.getElementById("newName").value,
+            password: document.getElementById("newPassword").value
+          })
+        });
+        setMessage("extMessage", `Extension ${data.number} created`);
+        refresh();
+      } catch (err) {
+        setMessage("extMessage", err.message, true);
+      }
+    }
+
+    async function refresh() {
+      document.getElementById("sessionStatus").textContent = token ? "Authenticated" : "Not authenticated";
+      try {
+        const snapshot = await request("/api/stats");
+        document.getElementById("kpiExt").textContent = snapshot.extensions.length;
+        document.getElementById("kpiReg").textContent = snapshot.registrations.length;
+        document.getElementById("kpiCalls").textContent = snapshot.active_calls.length;
+        document.getElementById("snapshot").textContent = JSON.stringify(snapshot, null, 2);
+
+        document.getElementById("extensionsBody").innerHTML = snapshot.extensions.map(ext => `
+          <tr><td>${ext.number}</td><td>${ext.display_name}</td><td>${ext.max_calls}</td><td>${ext.voicemail_pin}</td></tr>
+        `).join("");
+
+        document.getElementById("registrationsBody").innerHTML = snapshot.registrations.map(reg => `
+          <tr><td>${reg.extension}</td><td>${reg.contact_uri}</td><td>${reg.source_addr}</td><td>${reg.transport}</td><td>${new Date(reg.expires_at).toLocaleString()}</td></tr>
+        `).join("");
+
+        document.getElementById("cdrBody").innerHTML = snapshot.cdr.map(cdr => `
+          <tr><td>${cdr.call_id}</td><td>${cdr.from_extension}</td><td>${cdr.to_extension}</td><td>${cdr.state}</td><td>${cdr.duration_sec}s</td></tr>
+        `).join("");
+      } catch (err) {
+        document.getElementById("snapshot").textContent = err.message;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

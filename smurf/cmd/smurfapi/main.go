@@ -353,6 +353,7 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/softphone", softphonePage)
+	mux.HandleFunc("/sip", handleSIPWebSocketProxy)
 	mux.HandleFunc("/", adminSPA)
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}

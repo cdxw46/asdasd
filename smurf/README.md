@@ -21,6 +21,12 @@ Replicating every feature of commercial suites such as 3CX is a **long-term road
 sudo SMURF_LISTEN_IP=127.0.0.1 ./install.sh
 ```
 
+If the machine has no systemd (some containers), the installer prints manual start commands; otherwise services start automatically. PostgreSQL is started via `service postgresql start` when needed.
+
+**Public HTTPS without opening firewall (temporary):** after SMURF is listening on `127.0.0.1:5001`, run  
+`cloudflared tunnel --no-tls-verify --url https://127.0.0.1:5001`  
+and use the printed `*.trycloudflare.com` URL for `/`, `/softphone`, and WSS at `wss://<same-host>/sip` (proxied to local `SMURF_SIP_WSS`).
+
 - **Admin UI**: `https://<host>:5001/` — user `admin`, password `smurfadmin` (change after install).
 - **SIP extensions**: `1000` / `smurf1000`, `1001` / `smurf1001` (from `sql/seed.sql`).
 - **Web softphone**: `https://<host>:5001/softphone` — WebRTC audio + SIP signaling over WSS to `SMURF_SIP_WSS` (default `wss://<host>:5081/sip`). Trust the server certificate in the browser.

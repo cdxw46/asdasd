@@ -23,7 +23,7 @@
   <p><small>Use the same TLS cert the server presents (self-signed: import <code>/etc/smurf/tls.crt</code> as trusted). Sec-WebSocket-Protocol: <code>sip</code> (RFC 7118).</small></p>
 
   <label>WSS URL</label>
-  <input id="wssUrl" type="text" value="wss://127.0.0.1:5081/sip" autocomplete="off"/>
+  <input id="wssUrl" type="text" value="" autocomplete="off"/>
 
   <label>Realm</label>
   <input id="realm" value="smurf.local"/>
@@ -56,6 +56,9 @@
 <script>
 (function(){
 const $ = id => document.getElementById(id);
+if (!$('wssUrl').value) {
+  $('wssUrl').value = (location.protocol === 'https:' ? 'wss://' + location.host + '/sip' : 'wss://127.0.0.1:5081/sip');
+}
 const logEl = $('log');
 function log(m){ logEl.textContent += m + '\n'; logEl.scrollTop = logEl.scrollHeight; }
 

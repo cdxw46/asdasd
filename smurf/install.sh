@@ -17,6 +17,11 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y postgresql openssl ca-certificates curl
 
+# PostgreSQL may not auto-start in minimal/container images.
+if command -v service >/dev/null 2>&1; then
+	service postgresql start || true
+fi
+
 if ! command -v go >/dev/null 2>&1; then
   echo "Installing Go from upstream tarball..."
   GO_VER="1.22.2"
@@ -64,11 +69,18 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_queues_webhooks.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_voicemail_trunks.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_ivr_moh_record.sql"
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed_ivr_moh.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/migrate_extensions_ivr.sql" || true
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed_queues.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed_ivr_moh.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/migrate_transport_ws.sql" || true
+
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf <<'SQL'
+GRANT ALL ON ALL TABLES IN SCHEMA public TO smurf;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO smurf;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO smurf;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO smurf;
+SQL
 
 cat > /etc/smurf/smurf.env <<ENV
 SMURF_DATABASE_URL=postgres://smurf:${SMURF_DB_PASSWORD}@127.0.0.1:5432/smurf?sslmode=disable
@@ -84,6 +96,8 @@ SMURF_TLS_CERT=/etc/smurf/tls.crt
 SMURF_TLS_KEY=/etc/smurf/tls.key
 SMURF_API_LISTEN=0.0.0.0:5001
 SMURF_JWT_SECRET=${SMURF_JWT_SECRET}
+SMURF_WSS_UPSTREAM=127.0.0.1:5081
+SMURF_WSS_TLS_SERVER_NAME=smurf.local
 ENV
 chmod 0640 /etc/smurf/smurf.env
 
@@ -98,8 +112,15 @@ install -m 0644 "${ROOT}/systemd/smurfrelay.service" /etc/systemd/system/smurfre
 install -m 0644 "${ROOT}/systemd/smurfsip.service" /etc/systemd/system/smurfsip.service
 install -m 0644 "${ROOT}/systemd/smurfapi.service" /etc/systemd/system/smurfapi.service
 
-systemctl daemon-reload
-systemctl enable --now smurfrelay smurfsip smurfapi
+if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+	systemctl daemon-reload
+	systemctl enable --now smurfrelay smurfsip smurfapi || true
+else
+	echo "Note: systemd not active; start manually after install:" >&2
+	echo "  source /etc/smurf/smurf.env && /opt/smurf/smurfrelay &" >&2
+	echo "  source /etc/smurf/smurf.env && /opt/smurf/smurfsip &" >&2
+	echo "  source /etc/smurf/smurf.env && /opt/smurf/smurfapi &" >&2
+fi
 
 echo "SMURF installed."
 echo "Admin UI: https://${LISTEN_IP}:5001/ (admin / smurfadmin)"

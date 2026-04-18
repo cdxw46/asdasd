@@ -1,0 +1,14 @@
+[Unit]
+Description=SMURF SIP server
+After=network-online.target postgresql.service smurfrelay.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/smurf/smurfsip
+Restart=always
+RestartSec=2
+EnvironmentFile=-/etc/smurf/smurf.env
+
+[Install]
+WantedBy=multi-user.target

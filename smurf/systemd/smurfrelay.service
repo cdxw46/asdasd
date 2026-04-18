@@ -1,0 +1,14 @@
+[Unit]
+Description=SMURF RTP relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/smurf/smurfrelay -bind=${SMURF_RELAY_BIND} -control=127.0.0.1:19000
+Restart=always
+RestartSec=2
+EnvironmentFile=-/etc/smurf/smurf.env
+
+[Install]
+WantedBy=multi-user.target

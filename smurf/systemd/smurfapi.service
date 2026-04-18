@@ -1,0 +1,14 @@
+[Unit]
+Description=SMURF HTTPS API and admin UI
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/smurf/smurfapi
+Restart=always
+RestartSec=2
+EnvironmentFile=-/etc/smurf/smurf.env
+
+[Install]
+WantedBy=multi-user.target

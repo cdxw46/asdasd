@@ -64,6 +64,44 @@ type CDR struct {
 	DurationSec   int       `json:"duration_sec"`
 }
 
+type PresenceState struct {
+	Extension string    `json:"extension"`
+	Status    string    `json:"status"`
+	Note      string    `json:"note"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type ChatMessage struct {
+	ID          int64     `json:"id"`
+	FromExt     string    `json:"from_extension"`
+	ToExt       string    `json:"to_extension"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+	DeliveredAt time.Time `json:"delivered_at,omitempty"`
+}
+
+type VoicemailMessage struct {
+	ID          int64     `json:"id"`
+	Extension   string    `json:"extension"`
+	FromExt     string    `json:"from_extension"`
+	CallID      string    `json:"call_id"`
+	FilePath    string    `json:"file_path"`
+	DurationSec int       `json:"duration_sec"`
+	Listened    bool      `json:"listened"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type Recording struct {
+	ID          int64     `json:"id"`
+	CallID      string    `json:"call_id"`
+	FromExt     string    `json:"from_extension"`
+	ToExt       string    `json:"to_extension"`
+	FilePath    string    `json:"file_path"`
+	Format      string    `json:"format"`
+	DurationSec int       `json:"duration_sec"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 func Open(cfg *config.Config) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o755); err != nil {
 		return nil, err
@@ -147,6 +185,40 @@ func (s *Store) migrate(ctx context.Context, cfg *config.Config) error {
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS presence (
+			extension TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			note TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS chat_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			from_extension TEXT NOT NULL,
+			to_extension TEXT NOT NULL,
+			body TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			delivered_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS voicemail_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			extension TEXT NOT NULL,
+			from_extension TEXT NOT NULL,
+			call_id TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			duration_sec INTEGER NOT NULL DEFAULT 0,
+			listened INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS recordings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			call_id TEXT NOT NULL,
+			from_extension TEXT NOT NULL,
+			to_extension TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			format TEXT NOT NULL,
+			duration_sec INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.SQL.ExecContext(ctx, stmt); err != nil {
@@ -197,6 +269,18 @@ func (s *Store) seed(ctx context.Context, cfg *config.Config) error {
 			return err
 		}
 	}
+	extRows, err := s.ListExtensions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ext := range extRows {
+		if _, err := s.SQL.ExecContext(ctx,
+			`INSERT INTO presence(extension, status, note, updated_at) VALUES(?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
+			ext.Number, "offline", "", now,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -241,6 +325,10 @@ func (s *Store) CreateExtension(ctx context.Context, cfg *config.Config, number,
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	_, _ = s.SQL.ExecContext(ctx,
+		`INSERT INTO presence(extension, status, note, updated_at) VALUES(?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
+		number, "offline", "", now,
+	)
 	return s.GetExtensionByID(ctx, id)
 }
 
@@ -467,4 +555,238 @@ func nullTime(t time.Time) any {
 		return nil
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+func (s *Store) UpsertPresence(ctx context.Context, extension, status, note string) error {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "offline"
+	}
+	_, err := s.SQL.ExecContext(ctx, `
+		INSERT INTO presence(extension, status, note, updated_at)
+		VALUES(?,?,?,?)
+		ON CONFLICT(extension) DO UPDATE SET
+			status=excluded.status,
+			note=excluded.note,
+			updated_at=excluded.updated_at`,
+		strings.TrimSpace(extension), status, strings.TrimSpace(note), time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+func (s *Store) ListPresence(ctx context.Context) ([]PresenceState, error) {
+	rows, err := s.SQL.QueryContext(ctx, `SELECT extension, status, note, updated_at FROM presence ORDER BY extension`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PresenceState
+	for rows.Next() {
+		var item PresenceState
+		var updatedAt string
+		if err := rows.Scan(&item.Extension, &item.Status, &item.Note, &updatedAt); err != nil {
+			return nil, err
+		}
+		item.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateChatMessage(ctx context.Context, fromExt, toExt, body string) (*ChatMessage, error) {
+	fromExt = strings.TrimSpace(fromExt)
+	toExt = strings.TrimSpace(toExt)
+	body = strings.TrimSpace(body)
+	if fromExt == "" || toExt == "" || body == "" {
+		return nil, errors.New("from_extension, to_extension and body are required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.SQL.ExecContext(ctx,
+		`INSERT INTO chat_messages(from_extension, to_extension, body, created_at) VALUES(?,?,?,?)`,
+		fromExt, toExt, body, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return s.GetChatMessage(ctx, id)
+}
+
+func (s *Store) GetChatMessage(ctx context.Context, id int64) (*ChatMessage, error) {
+	row := s.SQL.QueryRowContext(ctx, `
+		SELECT id, from_extension, to_extension, body, created_at, delivered_at
+		FROM chat_messages WHERE id = ?`, id,
+	)
+	var msg ChatMessage
+	var createdAt string
+	var deliveredAt sql.NullString
+	if err := row.Scan(&msg.ID, &msg.FromExt, &msg.ToExt, &msg.Body, &createdAt, &deliveredAt); err != nil {
+		return nil, err
+	}
+	msg.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	if deliveredAt.Valid {
+		msg.DeliveredAt, _ = time.Parse(time.RFC3339, deliveredAt.String)
+	}
+	return &msg, nil
+}
+
+func (s *Store) ListChatMessages(ctx context.Context, extension string, limit int) ([]ChatMessage, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	extension = strings.TrimSpace(extension)
+	rows, err := s.SQL.QueryContext(ctx, `
+		SELECT id, from_extension, to_extension, body, created_at, delivered_at
+		FROM chat_messages
+		WHERE from_extension = ? OR to_extension = ?
+		ORDER BY id DESC
+		LIMIT ?`, extension, extension, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChatMessage
+	for rows.Next() {
+		var msg ChatMessage
+		var createdAt string
+		var deliveredAt sql.NullString
+		if err := rows.Scan(&msg.ID, &msg.FromExt, &msg.ToExt, &msg.Body, &createdAt, &deliveredAt); err != nil {
+			return nil, err
+		}
+		msg.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		if deliveredAt.Valid {
+			msg.DeliveredAt, _ = time.Parse(time.RFC3339, deliveredAt.String)
+		}
+		out = append(out, msg)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateVoicemailMessage(ctx context.Context, item VoicemailMessage) (*VoicemailMessage, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.SQL.ExecContext(ctx, `
+		INSERT INTO voicemail_messages(extension, from_extension, call_id, file_path, duration_sec, listened, created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		strings.TrimSpace(item.Extension),
+		strings.TrimSpace(item.FromExt),
+		strings.TrimSpace(item.CallID),
+		strings.TrimSpace(item.FilePath),
+		item.DurationSec,
+		boolToInt(item.Listened),
+		now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return s.GetVoicemailMessage(ctx, id)
+}
+
+func (s *Store) GetVoicemailMessage(ctx context.Context, id int64) (*VoicemailMessage, error) {
+	row := s.SQL.QueryRowContext(ctx, `
+		SELECT id, extension, from_extension, call_id, file_path, duration_sec, listened, created_at
+		FROM voicemail_messages WHERE id = ?`, id,
+	)
+	var item VoicemailMessage
+	var listened int
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.Extension, &item.FromExt, &item.CallID, &item.FilePath, &item.DurationSec, &listened, &createdAt); err != nil {
+		return nil, err
+	}
+	item.Listened = listened != 0
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) ListVoicemailMessages(ctx context.Context, extension string) ([]VoicemailMessage, error) {
+	rows, err := s.SQL.QueryContext(ctx, `
+		SELECT id, extension, from_extension, call_id, file_path, duration_sec, listened, created_at
+		FROM voicemail_messages
+		WHERE extension = ?
+		ORDER BY id DESC`, strings.TrimSpace(extension),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VoicemailMessage
+	for rows.Next() {
+		var item VoicemailMessage
+		var listened int
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.Extension, &item.FromExt, &item.CallID, &item.FilePath, &item.DurationSec, &listened, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Listened = listened != 0
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateRecording(ctx context.Context, item Recording) (*Recording, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.SQL.ExecContext(ctx, `
+		INSERT INTO recordings(call_id, from_extension, to_extension, file_path, format, duration_sec, created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		strings.TrimSpace(item.CallID),
+		strings.TrimSpace(item.FromExt),
+		strings.TrimSpace(item.ToExt),
+		strings.TrimSpace(item.FilePath),
+		strings.TrimSpace(item.Format),
+		item.DurationSec,
+		now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return s.GetRecording(ctx, id)
+}
+
+func (s *Store) GetRecording(ctx context.Context, id int64) (*Recording, error) {
+	row := s.SQL.QueryRowContext(ctx, `
+		SELECT id, call_id, from_extension, to_extension, file_path, format, duration_sec, created_at
+		FROM recordings WHERE id = ?`, id,
+	)
+	var item Recording
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.CallID, &item.FromExt, &item.ToExt, &item.FilePath, &item.Format, &item.DurationSec, &createdAt); err != nil {
+		return nil, err
+	}
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) ListRecordings(ctx context.Context, limit int) ([]Recording, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.SQL.QueryContext(ctx, `
+		SELECT id, call_id, from_extension, to_extension, file_path, format, duration_sec, created_at
+		FROM recordings ORDER BY id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Recording
+	for rows.Next() {
+		var item Recording
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.CallID, &item.FromExt, &item.ToExt, &item.FilePath, &item.Format, &item.DurationSec, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

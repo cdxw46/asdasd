@@ -17,7 +17,9 @@ import (
 	"smurf/internal/config"
 	"smurf/internal/db"
 	"smurf/internal/pbx"
+	"smurf/internal/realtime"
 	"smurf/internal/util"
+	"smurf/internal/ws"
 )
 
 //go:embed web/*
@@ -28,18 +30,23 @@ type Server struct {
 	store    *db.Store
 	pbx      *pbx.Engine
 	logger   *util.Logger
+	hub      *realtime.Hub
+	ws       *ws.Server
 	http     *http.Server
 	tokenTTL time.Duration
 }
 
 func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, logger *util.Logger) *Server {
+	hub := realtime.NewHub()
 	s := &Server{
 		cfg:      cfg,
 		store:    store,
 		pbx:      pbxEngine,
 		logger:   logger,
+		hub:      hub,
 		tokenTTL: time.Duration(cfg.Security.AdminTokenHours) * time.Hour,
 	}
+	s.ws = ws.New(cfg, store, logger, hub, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/login", s.handleLogin)
@@ -48,6 +55,11 @@ func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, logger *uti
 	mux.Handle("/api/cdr", s.authRequired(http.HandlerFunc(s.handleCDR)))
 	mux.Handle("/api/stats", s.authRequired(http.HandlerFunc(s.handleStats)))
 	mux.Handle("/api/snapshot", s.authRequired(http.HandlerFunc(s.handleSnapshot)))
+	mux.Handle("/api/presence", s.authRequired(http.HandlerFunc(s.handlePresence)))
+	mux.Handle("/api/chat", s.authRequired(http.HandlerFunc(s.handleChat)))
+	mux.Handle("/api/voicemail", s.authRequired(http.HandlerFunc(s.handleVoicemail)))
+	mux.Handle("/api/recordings", s.authRequired(http.HandlerFunc(s.handleRecordings)))
+	mux.Handle("/ws", s.ws)
 	mux.Handle("/", s.staticHandler())
 
 	s.http = &http.Server{
@@ -217,13 +229,193 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	if cdr == nil {
 		cdr = []db.CDR{}
 	}
+	presence, err := s.store.ListPresence(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if presence == nil {
+		presence = []db.PresenceState{}
+	}
+	chat, err := s.store.ListChatMessages(r.Context(), "", 100)
+	if err != nil {
+		chat = []db.ChatMessage{}
+	}
+	recordings, err := s.store.ListRecordings(r.Context(), 100)
+	if err != nil {
+		recordings = []db.Recording{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"extensions":    extensions,
 		"registrations": registrations,
 		"cdr":           cdr,
 		"active_calls":  s.pbx.Snapshot(),
 		"stats":         s.pbx.Stats(),
+		"presence":      presence,
+		"chat":          chat,
+		"recordings":    recordings,
 	})
+}
+
+func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.store.ListPresence(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if rows == nil {
+			rows = []db.PresenceState{}
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			Extension string `json:"extension"`
+			Status    string `json:"status"`
+			Note      string `json:"note"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if err := s.store.UpsertPresence(r.Context(), body.Extension, body.Status, body.Note); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		state := map[string]any{
+			"extension": body.Extension,
+			"status":    strings.TrimSpace(body.Status),
+			"note":      strings.TrimSpace(body.Note),
+			"updated_at": time.Now().UTC(),
+		}
+		s.hub.Publish("presence", "presence.updated", state)
+		writeJSON(w, http.StatusOK, state)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		extension := strings.TrimSpace(r.URL.Query().Get("extension"))
+		rows, err := s.store.ListChatMessages(r.Context(), extension, 200)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if rows == nil {
+			rows = []db.ChatMessage{}
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			FromExt string `json:"from_extension"`
+			ToExt   string `json:"to_extension"`
+			Body    string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		msg, err := s.store.CreateChatMessage(r.Context(), body.FromExt, body.ToExt, body.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.hub.Publish("chat", "chat.message", msg)
+		writeJSON(w, http.StatusCreated, msg)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleVoicemail(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		extension := strings.TrimSpace(r.URL.Query().Get("extension"))
+		rows, err := s.store.ListVoicemailMessages(r.Context(), extension)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if rows == nil {
+			rows = []db.VoicemailMessage{}
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			Extension   string `json:"extension"`
+			FromExt     string `json:"from_extension"`
+			CallID      string `json:"call_id"`
+			FilePath    string `json:"file_path"`
+			DurationSec int    `json:"duration_sec"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		item, err := s.store.CreateVoicemailMessage(r.Context(), db.VoicemailMessage{
+			Extension:   body.Extension,
+			FromExt:     body.FromExt,
+			CallID:      body.CallID,
+			FilePath:    body.FilePath,
+			DurationSec: body.DurationSec,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.hub.Publish("voicemail", "voicemail.new", item)
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.store.ListRecordings(r.Context(), 200)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if rows == nil {
+			rows = []db.Recording{}
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			CallID      string `json:"call_id"`
+			FromExt     string `json:"from_extension"`
+			ToExt       string `json:"to_extension"`
+			FilePath    string `json:"file_path"`
+			Format      string `json:"format"`
+			DurationSec int    `json:"duration_sec"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		item, err := s.store.CreateRecording(r.Context(), db.Recording{
+			CallID:      body.CallID,
+			FromExt:     body.FromExt,
+			ToExt:       body.ToExt,
+			FilePath:    body.FilePath,
+			Format:      body.Format,
+			DurationSec: body.DurationSec,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.hub.Publish("recordings", "recording.new", item)
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {

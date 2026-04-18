@@ -3,10 +3,11 @@
  SMURF is a custom SIP PBX foundation written from scratch in Go. This repository includes:
  
  - SIP registrar and B2BUA core with UDP/TCP/TLS listeners
+- SIP over WebSocket transport for browser-facing signaling
  - Digest authentication with MD5 and SHA-256
  - Internal extension routing and RTP relay
  - HTTPS admin/API server on port 5001
- - SQLite-backed persistence for extensions, registrations, failed auth, and CDR
+- SQLite-backed persistence for extensions, registrations, failed auth, CDR, presence, chat, voicemail, and recordings
  - systemd unit and one-shot installer
  
  ## Current scope
@@ -14,11 +15,14 @@
  This codebase provides the first deployable SMURF core:
  
  - SIP REGISTER, INVITE, ACK, BYE, CANCEL, OPTIONS
+- SIP over WebSocket listener and upgrade handling
  - Extension auth and registration persistence
  - Internal extension-to-extension call routing
  - RTP relay port allocation and media address rewriting in SDP
  - Admin login with JWT
- - Admin panel for extensions, registrations, stats, and CDR
+- Admin panel for extensions, registrations, stats, CDR, presence, chat, voicemail, recordings, and browser-side softphone controls
+- Presence and internal chat persistence with realtime event bus
+- Voicemail and recording metadata persistence with API access
  - Automatic TLS certificate generation during install
  
  ## Installation
@@ -61,6 +65,7 @@
  - SIP TCP: `5060`
  - SIP TLS: `5061`
  - HTTPS admin/API: `5001`
+- WebSocket SIP / realtime transport: `/ws` over HTTPS `5001`
  - RTP relay: `20000-20998/udp`
  
  ## Admin panel
@@ -79,6 +84,11 @@
  - `GET /api/cdr`
  - `GET /api/stats`
  - `GET /api/snapshot`
+- `GET/POST /api/presence`
+- `GET/POST /api/chat`
+- `GET/POST /api/voicemail`
+- `GET/POST /api/recordings`
+- `GET /ws` (WebSocket upgrade endpoint)
  
  ## Config
  
@@ -113,3 +123,15 @@
  4. Place a SIP INVITE from one extension to the other
  
  SMURF rewrites SDP to anchor audio through its RTP relay pool.
+
+## Browser and realtime layer
+
+- WebSocket upgrade endpoint is exposed at `/ws`
+- JSON realtime events can be consumed over `/ws`
+- SIP messages can be transported over WebSocket using the `sip` subprotocol
+- The embedded web UI includes:
+  - admin login
+  - presence controls
+  - internal chat
+  - voicemail/recording views
+  - initial browser softphone controls for SIP-over-WebSocket signaling

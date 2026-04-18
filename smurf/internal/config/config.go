@@ -36,6 +36,7 @@ type Config struct {
 
 	HTTP struct {
 		HTTPS   string `json:"https"`
+		WS      string `json:"ws"`
 		TLSCert string `json:"tls_cert"`
 		TLSKey  string `json:"tls_key"`
 	} `json:"http"`
@@ -48,6 +49,18 @@ type Config struct {
 		BlockSeconds     int    `json:"block_seconds"`
 		AdminTokenHours  int    `json:"admin_token_hours"`
 	} `json:"security"`
+
+	Features struct {
+		EnableWebSocketSIP bool `json:"enable_websocket_sip"`
+		EnableChat         bool `json:"enable_chat"`
+		EnableVoicemail    bool `json:"enable_voicemail"`
+		EnableRecording    bool `json:"enable_recording"`
+	} `json:"features"`
+
+	Media struct {
+		RecordingsDir string `json:"recordings_dir"`
+		VoicemailDir  string `json:"voicemail_dir"`
+	} `json:"media"`
 }
 
 func Default() *Config {
@@ -70,6 +83,7 @@ func Default() *Config {
 	cfg.RTP.EndPort = 20998
 	cfg.RTP.DSCP = 46
 	cfg.HTTP.HTTPS = "0.0.0.0:5001"
+	cfg.HTTP.WS = "0.0.0.0:5080"
 	cfg.HTTP.TLSCert = "/etc/smurf/tls/server.crt"
 	cfg.HTTP.TLSKey = "/etc/smurf/tls/server.key"
 	cfg.Security.JWTSecret = "change-this-jwt-secret"
@@ -78,6 +92,12 @@ func Default() *Config {
 	cfg.Security.FailThreshold = 5
 	cfg.Security.BlockSeconds = 900
 	cfg.Security.AdminTokenHours = 12
+	cfg.Features.EnableWebSocketSIP = true
+	cfg.Features.EnableChat = true
+	cfg.Features.EnableVoicemail = true
+	cfg.Features.EnableRecording = true
+	cfg.Media.RecordingsDir = "/var/lib/smurf/recordings"
+	cfg.Media.VoicemailDir = "/var/lib/smurf/voicemail"
 	return cfg
 }
 
@@ -131,6 +151,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RTP.StartPort <= 0 || c.RTP.EndPort <= 0 || c.RTP.EndPort <= c.RTP.StartPort {
 		return fmt.Errorf("invalid RTP port range")
+	}
+	if c.HTTP.WS == "" {
+		return fmt.Errorf("websocket listen address is required")
 	}
 	if c.Security.JWTSecret == "" {
 		return fmt.Errorf("jwt secret is required")

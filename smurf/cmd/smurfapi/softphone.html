@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SMURF WebRTC (SIP over WebSocket)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; background: #0b1220; color: #e5e7eb; max-width: 560px; }
+    h1 { font-size: 1.1rem; }
+    label { display: block; margin: .4rem 0 .15rem; color: #9ca3af; font-size: .8rem; }
+    input, button { width: 100%; padding: .45rem; border-radius: 6px; border: 1px solid #374151; background: #111827; color: #e5e7eb; box-sizing: border-box; }
+    button { background: #2563eb; border: none; cursor: pointer; margin-top: .35rem; }
+    button.secondary { background: #4b5563; }
+    .row { display: flex; gap: .5rem; }
+    .row input { flex: 1; }
+    #log { font-family: ui-monospace, monospace; font-size: .72rem; background: #020617; padding: .5rem; border-radius: 6px; max-height: 200px; overflow: auto; margin-top: .75rem; white-space: pre-wrap; word-break: break-all; }
+    .err { color: #f87171; font-size: .85rem; margin-top: .35rem; }
+    small { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>SMURF softphone (WebRTC + SIP over WSS)</h1>
+  <p><small>Use the same TLS cert the server presents (self-signed: import <code>/etc/smurf/tls.crt</code> as trusted). Sec-WebSocket-Protocol: <code>sip</code> (RFC 7118).</small></p>
+
+  <label>WSS URL</label>
+  <input id="wssUrl" type="text" value="wss://127.0.0.1:5081/sip" autocomplete="off"/>
+
+  <label>Realm</label>
+  <input id="realm" value="smurf.local"/>
+
+  <div class="row">
+    <div style="flex:1">
+      <label>Extension</label>
+      <input id="ext" value="1000"/>
+    </div>
+    <div style="flex:1">
+      <label>Secret</label>
+      <input id="secret" type="password" value="smurf1000"/>
+    </div>
+  </div>
+
+  <button id="btnReg">Register</button>
+  <button class="secondary" id="btnUnreg">Unregister</button>
+
+  <label style="margin-top:1rem">Call extension</label>
+  <input id="callee" value="1001"/>
+
+  <div class="row" style="margin-top:.35rem">
+    <button id="btnCall">Call</button>
+    <button class="secondary" id="btnHang">Hang up</button>
+  </div>
+
+  <p class="err" id="err"></p>
+  <div id="log"></div>
+
+<script>
+(function(){
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+function log(m){ logEl.textContent += m + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+function randHex(n){
+  const a = new Uint8Array(n); crypto.getRandomValues(a);
+  return [...a].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+
+async function sha256Hex(s){
+  const b = new TextEncoder().encode(s);
+  const buf = await crypto.subtle.digest('SHA-256', b);
+  return [...new Uint8Array(buf)].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+
+function parseDigest(h){
+  const m = {};
+  const t = h.replace(/^Digest\s+/i,'');
+  for(const part of t.split(',')){
+    const kv = part.trim().split('=');
+    if(kv.length<2) continue;
+    let v = kv.slice(1).join('=').trim();
+    if(v[0]==='"') v = v.slice(1,-1);
+    m[kv[0].trim().toLowerCase()] = v;
+  }
+  return m;
+}
+
+async function digestAuthHeader(ch, method, digestURI, body, user, pass, isProxy){
+  const ha1 = await sha256Hex(user + ':' + ch.realm + ':' + pass);
+  const qop = (ch.qop||'auth').split(',')[0].replace(/"/g,'').trim();
+  const ha2 = qop === 'auth-int'
+    ? await sha256Hex(method + ':' + digestURI + ':' + await sha256Hex(body||''))
+    : await sha256Hex(method + ':' + digestURI);
+  const nc = '00000001';
+  const cnonce = randHex(8);
+  const resp = await sha256Hex(ha1 + ':' + ch.nonce + ':' + nc + ':' + cnonce + ':' + qop + ':' + ha2);
+  const name = isProxy ? 'Proxy-Authorization' : 'Authorization';
+  return name + `: Digest username="${user}", realm="${ch.realm}", nonce="${ch.nonce}", uri="${digestURI}", response="${resp}", algorithm=SHA-256, qop=${qop}, nc=${nc}, cnonce="${cnonce}"`;
+}
+
+let ws = null;
+let realm = '', ext = '', secret = '';
+let regCallId = '';
+let inviteCallId = '';
+let fromTag = '';
+let cseqReg = 0;
+let cseqInvite = 0;
+let branchSeq = 0;
+let toTag = '';
+let pc = null;
+
+function sipBranch(){ return 'z9hG4bK' + randHex(8) + '-' + (++branchSeq); }
+
+function send(msg){
+  if(!ws || ws.readyState!==1) throw new Error('WebSocket not connected');
+  ws.send(msg);
+  log('>> ' + msg.split('\r\n')[0]);
+}
+
+function buildRegister(authHeader){
+  cseqReg++;
+  const uri = 'sip:' + ext + '@' + realm;
+  let h = 'REGISTER ' + uri + ';transport=ws SIP/2.0\r\n';
+  h += 'Via: SIP/2.0/WSS invalid;branch=' + sipBranch() + '\r\n';
+  h += 'Max-Forwards: 70\r\n';
+  h += 'From: <' + uri + '>;tag=' + fromTag + '\r\n';
+  h += 'To: <' + uri + '>\r\n';
+  h += 'Call-ID: ' + regCallId + '\r\n';
+  h += 'CSeq: ' + cseqReg + ' REGISTER\r\n';
+  h += 'Contact: <' + uri + ';transport=ws>\r\n';
+  h += 'Expires: 3600\r\n';
+  if(authHeader) h += authHeader + '\r\n';
+  h += 'Content-Length: 0\r\n\r\n';
+  return h;
+}
+
+async function handleInbound(text){
+  const lines = text.split('\r\n');
+  const first = lines[0];
+  log('<< ' + first);
+  if(first.startsWith('SIP/2.0 401')){
+    const www = lines.find(l=>l.toLowerCase().startsWith('www-authenticate:'));
+    const ch = parseDigest(www.split(':').slice(1).join(':'));
+    const uri = 'sip:' + ext + '@' + realm;
+    const auth = await digestAuthHeader(ch, 'REGISTER', uri, '', ext, secret, false);
+    send(buildRegister(auth));
+    return;
+  }
+  if(first.startsWith('SIP/2.0 407')){
+    const pa = lines.find(l=>l.toLowerCase().startsWith('proxy-authenticate:'));
+    const ch = parseDigest(pa.split(':').slice(1).join(':'));
+    const callee = $('callee').value.trim();
+    const uri = 'sip:' + callee + '@' + realm;
+    const body = pc && pc.localDescription
+      ? JSON.stringify({type: pc.localDescription.type, sdp: pc.localDescription.sdp}) : '';
+    const auth = await digestAuthHeader(ch, 'INVITE', uri, body, ext, secret, true);
+    send(await buildInviteWithAuth(auth));
+    return;
+  }
+  if(first.startsWith('SIP/2.0')){
+    const cl = lines.find(l=>l.toLowerCase().startsWith('content-type:'));
+    if(cl && cl.toLowerCase().includes('json')){
+      const sep = text.indexOf('\r\n\r\n');
+      if(sep >= 0){
+        const json = JSON.parse(text.slice(sep+4));
+        if(json.type === 'answer' && pc){
+          await pc.setRemoteDescription({type:'answer', sdp: json.sdp});
+          log('WebRTC answer set');
+        }
+      }
+    }
+    const toLine = lines.find(l=>l.toLowerCase().startsWith('to:'));
+    if(toLine && toLine.includes('tag=')){
+      toTag = toLine.split('tag=')[1].trim().split(/[;\s]/)[0];
+    }
+  }
+}
+
+async function buildInviteWithAuth(proxyAuth){
+  const callee = $('callee').value.trim();
+  const uri = 'sip:' + callee + '@' + realm;
+  cseqInvite++;
+  inviteCallId = randHex(16);
+  toTag = '';
+  if(pc){ pc.close(); pc = null; }
+  pc = new RTCPeerConnection({ iceServers: [] });
+  pc.addTransceiver('audio', { direction: 'sendrecv' });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await new Promise(r=>{
+    if(pc.iceGatheringState === 'complete') return r();
+    pc.onicegatheringstatechange = ()=>{ if(pc.iceGatheringState === 'complete') r(); };
+    setTimeout(r, 2500);
+  });
+  const body = JSON.stringify({ type: pc.localDescription.type, sdp: pc.localDescription.sdp });
+  let h = 'INVITE ' + uri + ' SIP/2.0\r\n';
+  h += 'Via: SIP/2.0/WSS invalid;branch=' + sipBranch() + '\r\n';
+  h += 'Max-Forwards: 70\r\n';
+  h += 'From: <sip:' + ext + '@' + realm + '>;tag=' + fromTag + '\r\n';
+  h += 'To: <' + uri + '>\r\n';
+  h += 'Call-ID: ' + inviteCallId + '\r\n';
+  h += 'CSeq: ' + cseqInvite + ' INVITE\r\n';
+  h += 'Contact: <sip:' + ext + '@' + realm + ';transport=ws>\r\n';
+  if(proxyAuth) h += proxyAuth + '\r\n';
+  h += 'Content-Type: application/json\r\n';
+  h += 'Content-Length: ' + body.length + '\r\n\r\n';
+  h += body;
+  return h;
+}
+
+$('btnReg').onclick = async () => {
+  $('err').textContent = '';
+  try {
+    realm = $('realm').value.trim();
+    ext = $('ext').value.trim();
+    secret = $('secret').value;
+    const url = $('wssUrl').value.trim();
+    if(ws) ws.close();
+    ws = new WebSocket(url, 'sip');
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (ev) => {
+      const t = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data);
+      handleInbound(t);
+    };
+    ws.onclose = () => log('WS closed');
+    await new Promise((res,rej)=>{ ws.onopen=res; ws.onerror=()=>rej(new Error('WebSocket failed')); });
+    log('WebSocket open');
+    regCallId = randHex(16);
+    fromTag = randHex(6);
+    cseqReg = 0;
+    branchSeq = 0;
+    send(buildRegister(''));
+  } catch(e){ $('err').textContent = e.message || String(e); }
+};
+
+$('btnUnreg').onclick = () => {
+  if(!ws || ws.readyState!==1) return;
+  cseqReg++;
+  const uri = 'sip:' + ext + '@' + realm;
+  let h = 'REGISTER ' + uri + ';transport=ws SIP/2.0\r\n';
+  h += 'Via: SIP/2.0/WSS invalid;branch=' + sipBranch() + '\r\n';
+  h += 'Max-Forwards: 70\r\n';
+  h += 'From: <' + uri + '>;tag=' + fromTag + '\r\n';
+  h += 'To: <' + uri + '>\r\n';
+  h += 'Call-ID: ' + regCallId + '\r\n';
+  h += 'CSeq: ' + cseqReg + ' REGISTER\r\n';
+  h += 'Contact: *\r\n';
+  h += 'Expires: 0\r\n';
+  h += 'Content-Length: 0\r\n\r\n';
+  send(h);
+};
+
+$('btnCall').onclick = async () => {
+  $('err').textContent = '';
+  try {
+    if(!ws || ws.readyState!==1) throw new Error('Register first (WebSocket)');
+    send(await buildInviteWithAuth(''));
+  } catch(e){ $('err').textContent = e.message || String(e); }
+};
+
+$('btnHang').onclick = () => {
+  if(!ws || ws.readyState!==1 || !inviteCallId) return;
+  cseqInvite++;
+  const callee = $('callee').value.trim();
+  const uri = 'sip:' + callee + '@' + realm;
+  let h = 'BYE ' + uri + ' SIP/2.0\r\n';
+  h += 'Via: SIP/2.0/WSS invalid;branch=' + sipBranch() + '\r\n';
+  h += 'Max-Forwards: 70\r\n';
+  h += 'From: <sip:' + ext + '@' + realm + '>;tag=' + fromTag + '\r\n';
+  h += 'To: <' + uri + '>' + (toTag ? ';tag=' + toTag : '') + '\r\n';
+  h += 'Call-ID: ' + inviteCallId + '\r\n';
+  h += 'CSeq: ' + cseqInvite + ' BYE\r\n';
+  h += 'Content-Length: 0\r\n\r\n';
+  send(h);
+  if(pc){ pc.close(); pc = null; }
+  inviteCallId = '';
+};
+})();
+</script>
+</body>
+</html>

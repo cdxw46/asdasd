@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,6 +19,9 @@ import (
 )
 
 // SMURF management API + minimal admin SPA on HTTPS :5001
+
+//go:embed softphone.html
+var softphoneHTML []byte
 
 type claims struct {
 	User string `json:"u"`
@@ -151,6 +155,7 @@ func main() {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("/softphone", softphonePage)
 	mux.HandleFunc("/", adminSPA)
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -228,6 +233,15 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
+func softphonePage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/softphone" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(softphoneHTML)
+}
+
 func adminSPA(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -254,7 +268,7 @@ th,td{padding:.4rem;border-bottom:1px solid #334155;text-align:left}
 small{color:#64748b}
 </style></head><body>
 <h1>SMURF — administration</h1>
-<p><small>API: <code>/api/v1</code> · OpenAPI: <code>/openapi.json</code></small></p>
+<p><small>API: <code>/api/v1</code> · OpenAPI: <code>/openapi.json</code> · WebRTC softphone: <a href="/softphone" style="color:#93c5fd">/softphone</a></small></p>
 <div class="card" id="loginBox">
 <h2>Sign in</h2>
 <label>Username</label><input id="user" value="admin"/>

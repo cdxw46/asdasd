@@ -48,6 +48,7 @@ SQL
 
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/migrate_transport_ws.sql" || true
 
 cat > /etc/smurf/smurf.env <<ENV
 SMURF_DATABASE_URL=postgres://smurf:${SMURF_DB_PASSWORD}@127.0.0.1:5432/smurf?sslmode=disable
@@ -58,6 +59,7 @@ SMURF_RELAY_CONTROL=127.0.0.1:19000
 SMURF_SIP_UDP=0.0.0.0:5060
 SMURF_SIP_TCP=0.0.0.0:5060
 SMURF_SIP_TLS=
+SMURF_SIP_WSS=0.0.0.0:5081
 SMURF_TLS_CERT=/etc/smurf/tls.crt
 SMURF_TLS_KEY=/etc/smurf/tls.key
 SMURF_API_LISTEN=0.0.0.0:5001

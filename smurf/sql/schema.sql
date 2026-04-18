@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS registrations (
     contact_uri TEXT NOT NULL,
     remote_ip   INET NOT NULL,
     remote_port INT NOT NULL CHECK (remote_port > 0 AND remote_port < 65536),
-    transport   VARCHAR(8) NOT NULL CHECK (transport IN ('udp', 'tcp', 'tls')),
+    transport   VARCHAR(8) NOT NULL CHECK (transport IN ('udp', 'tcp', 'tls', 'ws')),
     expires_at  TIMESTAMPTZ NOT NULL,
     call_id     TEXT NOT NULL DEFAULT '',
     user_agent  TEXT NOT NULL DEFAULT '',

@@ -10,6 +10,7 @@ Replicating every feature of commercial suites such as 3CX is a **long-term road
 |-----------|------|----------|--------------------------------|
 | SIP       | 5060 | UDP/TCP  | configurable via env          |
 | SIP TLS   | 5061 | TCP/TLS  | optional (`SMURF_SIP_TLS`)   |
+| SIP WSS   | 5081 | WebSocket + TLS | `SMURF_SIP_WSS`, path `/sip`, subprotocol `sip` (RFC 7118) |
 | Admin/API | 5001 | HTTPS    | self-signed cert by installer |
 | RTP relay | dynamic | UDP   | allocated per call on relay bind IP |
 | Relay control | 19000 | TCP | localhost only by default     |
@@ -21,7 +22,8 @@ sudo SMURF_LISTEN_IP=127.0.0.1 ./install.sh
 ```
 
 - **Admin UI**: `https://<host>:5001/` — user `admin`, password `smurfadmin` (change after install).
-- **SIP extension**: `1000` / secret `smurf1000` (from `sql/seed.sql`).
+- **SIP extensions**: `1000` / `smurf1000`, `1001` / `smurf1001` (from `sql/seed.sql`).
+- **Web softphone**: `https://<host>:5001/softphone` — WebRTC audio + SIP signaling over WSS to `SMURF_SIP_WSS` (default `wss://<host>:5081/sip`). Trust the server certificate in the browser.
 
 Environment overrides live in `/etc/smurf/smurf.env`.
 

@@ -20,6 +20,7 @@ import (
 	"github.com/smurf/pbx/internal/relay"
 	"github.com/smurf/pbx/internal/sdp"
 	"github.com/smurf/pbx/internal/sip"
+	"github.com/smurf/pbx/internal/wssip"
 )
 
 // SMURF SIP edge: REGISTER with digest (MD5 + SHA-256), internal INVITE B2BUA with RTP relay.
@@ -32,6 +33,7 @@ type nonceEntry struct {
 type Server struct {
 	realm     string
 	publicIP  string
+	sipPort   int
 	relayBind string
 	relayCtrl string
 	pool      *db.Pool
@@ -43,17 +45,28 @@ type Server struct {
 	// call state keyed by Call-ID of inbound leg
 	callMu sync.Mutex
 	calls  map[string]*callBridge
+
+	// WebSocket SIP (RFC 7118): extension -> signaling session
+	wsMu       sync.RWMutex
+	wsSessions map[string]*wssip.Session
+
+	// Outbound SIP request sent over WS; match responses by Call-ID
+	pendingMu     sync.Mutex
+	pendingWSResp map[string]chan *sip.Message
 }
 
 type callBridge struct {
-	callID     string
+	LegACallID string // caller dialog (e.g. WebSocket client)
+	LegBCallID string // toward callee (UDP/TCP leg)
+	CallerWS   *wssip.Session
+	CalleeWS   *wssip.Session // if callee registered over WS
 	fromExt    string
 	toExt      string
 	cdrID      int64
 	relayPorts [2]int // A,B
-	// leg A (caller) / leg B (callee) dialog tags etc.
-	aContact string
-	bContact string
+	webrtcCleanup func()
+
+	callerReg *db.Registration // cached for BYE from callee toward UDP caller
 }
 
 func main() {
@@ -65,6 +78,7 @@ func main() {
 	udpAddr := flag.String("udp", getenv("SMURF_SIP_UDP", "0.0.0.0:5060"), "SIP UDP listen")
 	tcpAddr := flag.String("tcp", getenv("SMURF_SIP_TCP", "0.0.0.0:5060"), "SIP TCP listen")
 	tlsAddr := flag.String("tls", getenv("SMURF_SIP_TLS", ""), "SIP TLS listen (empty to disable), e.g. 0.0.0.0:5061")
+	wssAddr := flag.String("wss", getenv("SMURF_SIP_WSS", "0.0.0.0:5081"), "SIP over WebSocket TLS listen (empty to disable)")
 	certFile := flag.String("tls-cert", getenv("SMURF_TLS_CERT", "/etc/smurf/tls.crt"), "TLS certificate")
 	keyFile := flag.String("tls-key", getenv("SMURF_TLS_KEY", "/etc/smurf/tls.key"), "TLS private key")
 	flag.Parse()
@@ -76,15 +90,25 @@ func main() {
 	}
 	defer pool.Close()
 
+	sipPort := 5060
+	if _, p, err := net.SplitHostPort(*udpAddr); err == nil {
+		if n, err := strconv.Atoi(p); err == nil {
+			sipPort = n
+		}
+	}
+
 	s := &Server{
-		realm:     *realm,
-		publicIP:  *publicIP,
-		relayBind: *relayBind,
-		relayCtrl: *relayCtrl,
-		pool:      pool,
-		relay:     relay.New(*relayCtrl),
-		nonces:    map[string]nonceEntry{},
-		calls:     map[string]*callBridge{},
+		realm:           *realm,
+		publicIP:        *publicIP,
+		sipPort:         sipPort,
+		relayBind:       *relayBind,
+		relayCtrl:       *relayCtrl,
+		pool:            pool,
+		relay:           relay.New(*relayCtrl),
+		nonces:          map[string]nonceEntry{},
+		calls:           map[string]*callBridge{},
+		wsSessions:      map[string]*wssip.Session{},
+		pendingWSResp:   map[string]chan *sip.Message{},
 	}
 
 	pc, err := net.ListenPacket("udp", *udpAddr)
@@ -95,6 +119,14 @@ func main() {
 	log.Printf("SIP UDP %s realm=%s public=%s relay=%s", *udpAddr, *realm, *publicIP, *relayCtrl)
 
 	go s.serveUDP(udp)
+
+	if *wssAddr != "" {
+		go func() {
+			if err := s.startWSS(*wssAddr, *certFile, *keyFile); err != nil {
+				log.Fatalf("sip wss: %v", err)
+			}
+		}()
+	}
 
 	if *tcpAddr != "" {
 		go func() {
@@ -161,7 +193,7 @@ func (s *Server) serveUDP(c *net.UDPConn) {
 		if err != nil {
 			continue
 		}
-		resp := s.handleMessage(msg, "udp", raddr.String(), raddr, c, nil)
+		resp := s.handleMessageWithWS(nil, msg, "udp", raddr.String(), raddr, c, nil)
 		if resp != nil {
 			_, _ = c.WriteToUDP([]byte(resp.String()), raddr)
 		}
@@ -187,7 +219,7 @@ func (s *Server) serveTCPConn(c net.Conn) {
 			consumed := sipConsumed(buf)
 			buf = buf[consumed:]
 			raddr := c.RemoteAddr().String()
-			resp := s.handleMessage(msg, tcpTransport(c), raddr, nil, nil, c)
+			resp := s.handleMessageWithWS(nil, msg, tcpTransport(c), raddr, nil, nil, c)
 			if resp != nil {
 				_, _ = io.WriteString(c, resp.String())
 			}
@@ -256,13 +288,13 @@ func sipConsumed(buf []byte) int {
 	return idx + 4 + cl
 }
 
-func (s *Server) handleMessage(m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
+func (s *Server) handleMessageWithWS(ws *wssip.Session, m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
 	ctx := context.Background()
 	switch {
 	case m.IsRequest && m.Method == "REGISTER":
-		return s.handleRegister(ctx, m, transport, raddr, udpRaddr, udpConn, tcpConn)
+		return s.handleRegister(ctx, ws, m, transport, raddr, udpRaddr, udpConn, tcpConn)
 	case m.IsRequest && m.Method == "INVITE":
-		return s.handleInvite(ctx, m, transport, raddr, udpRaddr, udpConn, tcpConn)
+		return s.handleInvite(ctx, ws, m, transport, raddr, udpRaddr, udpConn, tcpConn)
 	case m.IsRequest && m.Method == "ACK":
 		s.forwardMidDialogNoResponse(ctx, m, transport)
 		return nil
@@ -276,6 +308,19 @@ func (s *Server) handleMessage(m *sip.Message, transport, raddr string, udpRaddr
 		}
 		return nil
 	}
+}
+
+func (s *Server) sipViaUDP() string {
+	return fmt.Sprintf("SIP/2.0/UDP %s:%d;branch=%s", s.publicIP, s.sipPort, sipBranch())
+}
+
+func (s *Server) outboundContact(ext, transport string) string {
+	return fmt.Sprintf("<sip:%s@%s:%d;transport=%s>", ext, s.publicIP, s.sipPort, transport)
+}
+
+func isWebRTCJSONInvite(m *sip.Message) bool {
+	ct := strings.ToLower(m.Headers.Get("content-type"))
+	return strings.Contains(ct, "json")
 }
 
 func (s *Server) okOptions(m *sip.Message) *sip.Message {
@@ -312,7 +357,7 @@ func sipResponse(req *sip.Message, code int, reason string) *sip.Message {
 	return resp
 }
 
-func (s *Server) handleRegister(ctx context.Context, m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
+func (s *Server) handleRegister(ctx context.Context, ws *wssip.Session, m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
 	ext := sipParseUser(m.Headers.Get("to"))
 	if ext == "" {
 		return sipResponse(m, 400, "Bad Request")
@@ -360,13 +405,23 @@ func (s *Server) handleRegister(ctx context.Context, m *sip.Message, transport, 
 		return sipResponse(m, 400, "Bad Expires")
 	}
 	host, port := hostPortFromAddr(raddr)
+	regTransport := transport
+	regHost := host
+	regPort := port
+	regContact := contactURI(contact)
+	if ws != nil {
+		regTransport = "ws"
+		regHost = "0.0.0.0"
+		regPort = 0
+		regContact = "sip:" + ext + "@wss.invalid;transport=ws"
+	}
 	reg := db.Registration{
 		Extension:  ext,
 		AOR:        "sip:" + ext + "@" + s.realm,
-		ContactURI: contactURI(contact),
-		RemoteIP:   host,
-		RemotePort: port,
-		Transport:  transport,
+		ContactURI: regContact,
+		RemoteIP:   regHost,
+		RemotePort: regPort,
+		Transport:  regTransport,
 		ExpiresAt:  time.Now().Add(time.Duration(exp) * time.Second),
 		CallID:     m.Headers.Get("call-id"),
 		UserAgent:  m.Headers.Get("user-agent"),
@@ -378,6 +433,12 @@ func (s *Server) handleRegister(ctx context.Context, m *sip.Message, transport, 
 	resp := sipResponse(m, 200, "OK")
 	resp.AddHeader("Expires", strconv.Itoa(exp))
 	resp.AddHeader("Content-Length", "0")
+	if ws != nil {
+		ws.Ext = ext
+		s.wsMu.Lock()
+		s.wsSessions[ext] = ws
+		s.wsMu.Unlock()
+	}
 	return resp
 }
 
@@ -390,7 +451,7 @@ func (s *Server) challenge(m *sip.Message, ext string) *sip.Message {
 	params := sip.AuthParams{
 		"realm":     s.realm,
 		"nonce":     nonce,
-		"algorithm": "MD5",
+		"algorithm": "SHA-256",
 		"qop":       "auth",
 		"opaque":    sip.RandomNonce()[:16],
 	}
@@ -398,7 +459,7 @@ func (s *Server) challenge(m *sip.Message, ext string) *sip.Message {
 	s.nonces[nonce] = nonceEntry{params: params, until: time.Now().Add(10 * time.Minute)}
 	s.nonceMu.Unlock()
 	resp := sipResponse(m, 401, "Unauthorized")
-	www := fmt.Sprintf(`Digest realm="%s", nonce="%s", algorithm=MD5, qop="auth", opaque="%s"`,
+	www := fmt.Sprintf(`Digest realm="%s", nonce="%s", algorithm=SHA-256, qop="auth", opaque="%s"`,
 		s.realm, nonce, params["opaque"])
 	resp.AddHeader("WWW-Authenticate", www)
 	resp.AddHeader("Content-Length", "0")
@@ -406,7 +467,7 @@ func (s *Server) challenge(m *sip.Message, ext string) *sip.Message {
 	return resp
 }
 
-func (s *Server) handleInvite(ctx context.Context, m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
+func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
 	from := sipParseUser(m.Headers.Get("from"))
 	to := sipParseUser(m.Headers.Get("to"))
 	if from == "" || to == "" {
@@ -441,8 +502,22 @@ func (s *Server) handleInvite(ctx context.Context, m *sip.Message, transport, ra
 	if err != nil {
 		return sipResponse(m, 480, "Temporarily Unavailable")
 	}
+	var callerReg *db.Registration
+	if cr, err := s.pool.GetRegistration(ctx, from); err == nil {
+		callerReg = cr
+	}
+
+	if ws != nil {
+		s.wsMu.Lock()
+		s.wsSessions[from] = ws
+		s.wsMu.Unlock()
+	}
 
 	callID := m.Headers.Get("call-id")
+	if ws != nil && isWebRTCJSONInvite(m) {
+		return s.handleInviteWebRTC(ctx, m, ws, from, to, callID)
+	}
+
 	rtpA, rtpB, err := s.relay.OpenSession(callID)
 	if err != nil {
 		log.Printf("relay: %v", err)
@@ -453,9 +528,14 @@ func (s *Server) handleInvite(ctx context.Context, m *sip.Message, transport, ra
 		log.Printf("cdr: %v", err)
 	}
 
-	br := &callBridge{callID: callID, fromExt: from, toExt: to, cdrID: cdrID, relayPorts: [2]int{rtpA, rtpB}}
+	br := &callBridge{
+		LegACallID: callID, LegBCallID: callID + "-b", CallerWS: ws, CalleeWS: calleeWSSession(s, reg),
+		fromExt: from, toExt: to, cdrID: cdrID, relayPorts: [2]int{rtpA, rtpB},
+		callerReg: callerReg,
+	}
 	s.callMu.Lock()
 	s.calls[callID] = br
+	s.calls[callID+"-b"] = br
 	s.callMu.Unlock()
 
 	// Patch SDP for callee offer: same codecs, our public IP, relay leg B
@@ -466,48 +546,30 @@ func (s *Server) handleInvite(ctx context.Context, m *sip.Message, transport, ra
 	out.RequestURI = reg.ContactURI
 	out.Body = []byte(offerToCallee)
 	out.Headers = sip.HeaderMap{}
-	out.AddHeader("Via", fmt.Sprintf("SIP/2.0/UDP %s;branch=%s", s.publicIP+":5060", sipBranch()))
+	out.AddHeader("Via", s.sipViaUDP())
 	out.AddHeader("Max-Forwards", "70")
 	out.AddHeader("From", m.Headers.Get("from"))
 	out.AddHeader("To", fmt.Sprintf("<sip:%s@%s>", to, s.realm))
 	out.AddHeader("Call-ID", callID+"-b") // separate dialog towards callee
 	out.AddHeader("CSeq", nextCSeq(m.Headers.Get("cseq"), "INVITE"))
-	out.AddHeader("Contact", fmt.Sprintf("<sip:%s@%s:%s;transport=%s>", from, s.publicIP, "5060", transport))
+	out.AddHeader("Contact", s.outboundContact(from, transport))
 	out.AddHeader("Content-Type", "application/sdp")
 	out.AddHeader("Content-Length", strconv.Itoa(len(out.Body)))
 
 	respB, err := s.sendRequestToUA(ctx, reg, out)
 	if err != nil || respB == nil {
-		s.relay.CloseSession(callID)
-		s.callMu.Lock()
-		delete(s.calls, callID)
-		s.callMu.Unlock()
+		s.tearDownCall(br, callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, "relay-fail")
 		return sipResponse(m, 504, "Server Timeout")
 	}
 	if respB.StatusCode >= 300 {
-		s.relay.CloseSession(callID)
-		s.callMu.Lock()
-		delete(s.calls, callID)
-		s.callMu.Unlock()
+		s.tearDownCall(br, callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, fmt.Sprintf("sip-%d", respB.StatusCode))
 		return sipResponse(m, respB.StatusCode, respB.Reason)
 	}
 	if respB.StatusCode == 200 {
 		_ = s.pool.UpdateCDRAnswered(ctx, cdrID)
-		ack := &sip.Message{
-			StartLine: sip.StartLine{IsRequest: true, Method: "ACK", RequestURI: reg.ContactURI, Proto: "SIP/2.0"},
-			Headers:   sip.HeaderMap{},
-		}
-		ack.AddHeader("Via", fmt.Sprintf("SIP/2.0/UDP %s;branch=%s", s.publicIP+":5060", sipBranch()))
-		ack.AddHeader("Max-Forwards", "70")
-		ack.AddHeader("From", m.Headers.Get("from"))
-		if t := respB.Headers.Get("to"); t != "" {
-			ack.AddHeader("To", t)
-		}
-		ack.AddHeader("Call-ID", callID+"-b")
-		ack.AddHeader("CSeq", strings.Fields(m.Headers.Get("cseq"))[0]+" ACK")
-		ack.AddHeader("Content-Length", "0")
+		ack := ackToCallee(s, reg, m, respB, callID)
 		_ = s.sendRequestFireAndForget(reg, ack)
 	}
 	answerToCaller := sdp.PatchMediaEndpoint(string(respB.Body), s.publicIP, rtpA)
@@ -520,81 +582,6 @@ func (s *Server) handleInvite(ctx context.Context, m *sip.Message, transport, ra
 	resp.AddHeader("Content-Type", "application/sdp")
 	resp.AddHeader("Content-Length", strconv.Itoa(len(resp.Body)))
 	return resp
-}
-
-func (s *Server) forwardMidDialogNoResponse(ctx context.Context, m *sip.Message, transport string) {
-	callID := m.Headers.Get("call-id")
-	s.callMu.Lock()
-	br, ok := s.calls[callID]
-	s.callMu.Unlock()
-	if !ok {
-		return
-	}
-	reg, err := s.pool.GetRegistration(ctx, br.toExt)
-	if err != nil {
-		return
-	}
-	out := cloneRequest(m)
-	out.RequestURI = reg.ContactURI
-	out.Headers = sip.HeaderMap{}
-	out.AddHeader("Via", fmt.Sprintf("SIP/2.0/UDP %s;branch=%s", s.publicIP+":5060", sipBranch()))
-	out.AddHeader("Max-Forwards", "70")
-	out.AddHeader("From", m.Headers.Get("from"))
-	out.AddHeader("To", m.Headers.Get("to"))
-	out.AddHeader("Call-ID", callID+"-b")
-	out.AddHeader("CSeq", m.Headers.Get("cseq"))
-	if len(m.Body) > 0 {
-		out.Body = append([]byte(nil), m.Body...)
-		out.AddHeader("Content-Type", m.Headers.Get("content-type"))
-		out.AddHeader("Content-Length", strconv.Itoa(len(out.Body)))
-	} else {
-		out.AddHeader("Content-Length", "0")
-	}
-	_ = s.sendRequestFireAndForget(reg, out)
-}
-
-func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, transport, raddr string, udpRaddr *net.UDPAddr, udpConn *net.UDPConn, tcpConn net.Conn) *sip.Message {
-	callID := m.Headers.Get("call-id")
-	s.callMu.Lock()
-	br, ok := s.calls[callID]
-	s.callMu.Unlock()
-	if !ok {
-		return sipResponse(m, 481, "Call/Transaction Does Not Exist")
-	}
-	to := br.toExt
-	reg, err := s.pool.GetRegistration(ctx, to)
-	if err != nil {
-		return sipResponse(m, 481, "Call/Transaction Does Not Exist")
-	}
-	out := cloneRequest(m)
-	out.RequestURI = reg.ContactURI
-	out.Headers = sip.HeaderMap{}
-	out.AddHeader("Via", fmt.Sprintf("SIP/2.0/UDP %s;branch=%s", s.publicIP+":5060", sipBranch()))
-	out.AddHeader("Max-Forwards", "70")
-	out.AddHeader("From", m.Headers.Get("from"))
-	out.AddHeader("To", m.Headers.Get("to"))
-	out.AddHeader("Call-ID", callID+"-b")
-	out.AddHeader("CSeq", m.Headers.Get("cseq"))
-	if len(m.Body) > 0 {
-		out.Body = append([]byte(nil), m.Body...)
-		out.AddHeader("Content-Type", m.Headers.Get("content-type"))
-		out.AddHeader("Content-Length", strconv.Itoa(len(out.Body)))
-	} else {
-		out.AddHeader("Content-Length", "0")
-	}
-
-	respB, err := s.sendRequestToUA(ctx, reg, out)
-	if err != nil || respB == nil {
-		return sipResponse(m, 504, "Server Timeout")
-	}
-	if m.Method == "BYE" || m.Method == "CANCEL" {
-		s.relay.CloseSession(callID)
-		s.callMu.Lock()
-		delete(s.calls, callID)
-		s.callMu.Unlock()
-		_ = s.pool.UpdateCDREnded(ctx, br.cdrID, m.Method)
-	}
-	return sipResponse(m, respB.StatusCode, respB.Reason)
 }
 
 func (s *Server) proxyChallenge(m *sip.Message) *sip.Message {
@@ -615,75 +602,6 @@ func (s *Server) proxyChallenge(m *sip.Message) *sip.Message {
 	resp.AddHeader("Proxy-Authenticate", pa)
 	resp.AddHeader("Content-Length", "0")
 	return resp
-}
-
-func (s *Server) sendRequestToUA(ctx context.Context, reg *db.Registration, req *sip.Message) (*sip.Message, error) {
-	addr := fmt.Sprintf("%s:%d", reg.RemoteIP, reg.RemotePort)
-	var c net.Conn
-	var err error
-	switch reg.Transport {
-	case "tcp":
-		c, err = net.DialTimeout("tcp", addr, 5*time.Second)
-	case "tls":
-		c, err = tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
-	default:
-		c, err = net.DialTimeout("udp", addr, 5*time.Second)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-	if _, err := io.WriteString(c, req.String()); err != nil {
-		return nil, err
-	}
-	buf := make([]byte, 0, 65536)
-	tmp := make([]byte, 4096)
-	deadline := time.Now().Add(32 * time.Second)
-	for {
-		_ = c.SetReadDeadline(deadline)
-		n, err := c.Read(tmp)
-		if err != nil {
-			return nil, err
-		}
-		buf = append(buf, tmp[:n]...)
-		for sipMessageComplete(buf) {
-			msg, err := sip.ParseMessage(buf)
-			if err != nil {
-				return nil, err
-			}
-			cons := sipConsumed(buf)
-			buf = buf[cons:]
-			if !msg.IsRequest && msg.StatusCode >= 200 {
-				return msg, nil
-			}
-			if !msg.IsRequest && msg.StatusCode >= 100 && msg.StatusCode < 200 {
-				continue
-			}
-			if !msg.IsRequest {
-				return msg, nil
-			}
-		}
-	}
-}
-
-func (s *Server) sendRequestFireAndForget(reg *db.Registration, req *sip.Message) error {
-	addr := fmt.Sprintf("%s:%d", reg.RemoteIP, reg.RemotePort)
-	var c net.Conn
-	var err error
-	switch reg.Transport {
-	case "tcp":
-		c, err = net.DialTimeout("tcp", addr, 5*time.Second)
-	case "tls":
-		c, err = tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
-	default:
-		c, err = net.DialTimeout("udp", addr, 5*time.Second)
-	}
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-	_, err = io.WriteString(c, req.String())
-	return err
 }
 
 func cloneRequest(m *sip.Message) *sip.Message {

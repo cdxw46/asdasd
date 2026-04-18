@@ -95,8 +95,8 @@ func (m *Manager) CreateRelay(callID string) (*Session, error) {
 		Closed:     make(chan struct{}),
 	}
 	m.sessions[callID] = s
-	go s.pipe(callerConn, &s.CallerAddr, &s.CalleeAddr, calleeConn)
-	go s.pipe(calleeConn, &s.CalleeAddr, &s.CallerAddr, callerConn)
+	go s.pipe("caller", callerConn, &s.CallerAddr, &s.CalleeAddr, calleeConn)
+	go s.pipe("callee", calleeConn, &s.CalleeAddr, &s.CallerAddr, callerConn)
 	return s, nil
 }
 
@@ -148,7 +148,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *Session) pipe(conn *net.UDPConn, own *atomicAddr, peer *atomicAddr, peerConn *net.UDPConn) {
+func (s *Session) pipe(_ string, conn *net.UDPConn, own *atomicAddr, peer *atomicAddr, peerConn *net.UDPConn) {
 	buf := make([]byte, 2000)
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -168,6 +168,18 @@ func (s *Session) pipe(conn *net.UDPConn, own *atomicAddr, peer *atomicAddr, pee
 		if target := peer.Get(); target != nil {
 			_, _ = peerConn.WriteToUDP(buf[:n], target)
 		}
+	}
+}
+
+func (s *Session) PrimeCaller(addr *net.UDPAddr) {
+	if addr != nil {
+		s.CallerAddr.Set(addr)
+	}
+}
+
+func (s *Session) PrimeCallee(addr *net.UDPAddr) {
+	if addr != nil {
+		s.CalleeAddr.Set(addr)
 	}
 }
 

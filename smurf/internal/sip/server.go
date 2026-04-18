@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type inviteDialog struct {
 	Callee    string
 	CallerCtx *RequestContext
 	CalleeCtx *RequestContext
+	InviteReq *Message
 }
 
 type Server struct {
@@ -252,17 +254,22 @@ func (s *Server) handleResponse(ctx context.Context, msg *Message) {
 	switch {
 	case msg.StatusCode >= 100 && msg.StatusCode < 200:
 		if dialog.CallerCtx != nil {
-			_ = dialog.CallerCtx.Send(msg)
+			_ = dialog.CallerCtx.Send(stripTopVia(msg))
 		}
 	case msg.StatusCode >= 200 && msg.StatusCode < 300:
 		_ = s.pbx.MarkAnswered(context.Background(), callID)
+		if session := s.pbx.Get(callID); session != nil && strings.TrimSpace(msg.Body) != "" {
+			msg = msg.Clone()
+			msg.Body = rewriteSDPForRelay(msg.Body, s.cfg.RTP.PublicIP, session.CallerPort)
+			msg.SetHeader("Content-Length", fmt.Sprintf("%d", len(msg.Body)))
+		}
 		if dialog.CallerCtx != nil {
-			_ = dialog.CallerCtx.Send(msg)
+			_ = dialog.CallerCtx.Send(stripTopVia(msg))
 		}
 	default:
 		_ = s.pbx.MarkEnded(context.Background(), callID)
 		if dialog.CallerCtx != nil {
-			_ = dialog.CallerCtx.Send(msg)
+			_ = dialog.CallerCtx.Send(stripTopVia(msg))
 		}
 		s.invitesMu.Lock()
 		delete(s.invites, callID)
@@ -364,7 +371,7 @@ func (s *Server) handleInvite(ctx context.Context, msg *Message, reqCtx *Request
 		return
 	}
 	outbound := msg.Clone()
-	outbound.SetHeader("Via", buildTopVia(s.cfg, reqCtx.Transport)+"\r\n"+msg.GetHeader("Via"))
+	prependHeader(outbound, "Via", buildTopVia(s.cfg, reqCtx.Transport, reqCtx.LocalAddr))
 	outbound.SetHeader("Record-Route", fmt.Sprintf("<sip:%s;lr>", s.cfg.Domain))
 	outbound.Body = rewriteSDPForRelay(msg.Body, s.cfg.RTP.PublicIP, session.CalleePort)
 	outbound.SetHeader("Content-Length", fmt.Sprintf("%d", len(outbound.Body)))
@@ -378,6 +385,7 @@ func (s *Server) handleInvite(ctx context.Context, msg *Message, reqCtx *Request
 		Caller:    from,
 		Callee:    to,
 		CallerCtx: reqCtx,
+		InviteReq: msg.Clone(),
 	}
 	s.invitesMu.Unlock()
 
@@ -403,7 +411,8 @@ func (s *Server) handleAck(ctx context.Context, msg *Message) {
 	if err != nil || len(regs) == 0 {
 		return
 	}
-	_ = s.sendToRegistration(regs[0].Transport, normalizeSIPTarget(regs[0].SourceAddr), msg)
+	outbound := stripTopVia(msg)
+	_ = s.sendToRegistration(regs[0].Transport, normalizeSIPTarget(regs[0].SourceAddr), outbound)
 }
 
 func (s *Server) handleBye(ctx context.Context, msg *Message, reqCtx *RequestContext) {
@@ -421,7 +430,8 @@ func (s *Server) handleBye(ctx context.Context, msg *Message, reqCtx *RequestCon
 	}
 	regs, err := s.store.GetRegistrations(ctx, peer)
 	if err == nil && len(regs) > 0 {
-		_ = s.sendToRegistration(regs[0].Transport, normalizeSIPTarget(regs[0].SourceAddr), msg)
+		outbound := stripTopVia(msg)
+		_ = s.sendToRegistration(regs[0].Transport, normalizeSIPTarget(regs[0].SourceAddr), outbound)
 	}
 	_ = s.pbx.MarkEnded(ctx, callID)
 	s.invitesMu.Lock()
@@ -440,7 +450,8 @@ func (s *Server) handleCancel(ctx context.Context, msg *Message, reqCtx *Request
 	}
 	regs, err := s.store.GetRegistrations(ctx, dialog.Callee)
 	if err == nil && len(regs) > 0 {
-		_ = s.sendToRegistration(regs[0].Transport, normalizeSIPTarget(regs[0].SourceAddr), msg)
+		outbound := stripTopVia(msg)
+		_ = s.sendToRegistration(regs[0].Transport, normalizeSIPTarget(regs[0].SourceAddr), outbound)
 	}
 	_ = s.pbx.MarkEnded(ctx, callID)
 	s.invitesMu.Lock()
@@ -595,12 +606,39 @@ func parseDigestHeader(value string) map[string]string {
 	return out
 }
 
-func buildTopVia(cfg *config.Config, transport string) string {
-	host := cfg.Domain
-	if host == "" {
-		host = "127.0.0.1"
+func buildTopVia(cfg *config.Config, transport, localAddr string) string {
+	hostPort := strings.TrimSpace(localAddr)
+	if hostPort == "" {
+		host := cfg.Domain
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		hostPort = host
 	}
-	return fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(transport), host, auth.RandomHex(6))
+	return fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(transport), hostPort, auth.RandomHex(6))
+}
+
+func prependHeader(msg *Message, name, value string) {
+	if msg == nil {
+		return
+	}
+	key := textproto.CanonicalMIMEHeaderKey(name)
+	existing := append([]string(nil), msg.Headers[key]...)
+	msg.Headers[key] = append([]string{value}, existing...)
+}
+
+func stripTopVia(msg *Message) *Message {
+	if msg == nil {
+		return nil
+	}
+	out := msg.Clone()
+	via := out.Values("Via")
+	if len(via) <= 1 {
+		return out
+	}
+	key := "Via"
+	out.Headers[key] = append([]string(nil), via[1:]...)
+	return out
 }
 
 func hashForAlgorithm(algorithm, input string) string {

@@ -158,6 +158,34 @@ func (m *Message) AddHeader(name, value string) {
 	m.Headers[key] = append(m.Headers[key], value)
 }
 
+func (m *Message) SetHeaderValues(name string, values []string) {
+	key := textproto.CanonicalMIMEHeaderKey(name)
+	if len(values) == 0 {
+		delete(m.Headers, key)
+		return
+	}
+	m.Headers[key] = append([]string(nil), values...)
+}
+
+func (m *Message) PrependHeader(name, value string) {
+	key := textproto.CanonicalMIMEHeaderKey(name)
+	current := append([]string(nil), m.Headers[key]...)
+	m.Headers[key] = append([]string{value}, current...)
+}
+
+func (m *Message) RemoveFirstHeaderValue(name string) {
+	key := textproto.CanonicalMIMEHeaderKey(name)
+	values := m.Headers[key]
+	switch len(values) {
+	case 0:
+		return
+	case 1:
+		delete(m.Headers, key)
+	default:
+		m.Headers[key] = append([]string(nil), values[1:]...)
+	}
+}
+
 func (m *Message) DelHeader(name string) {
 	delete(m.Headers, textproto.CanonicalMIMEHeaderKey(name))
 }

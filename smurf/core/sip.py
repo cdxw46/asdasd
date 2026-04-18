@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
 import secrets
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
 SIP_VERSION = "SIP/2.0"
+MAX_CONTENT_LENGTH = 1024 * 1024
 
 
 def _normalize_header_name(name: str) -> str:
@@ -66,27 +68,36 @@ class SIPMessage:
 
 
 def parse_sip_message(raw_data: bytes) -> SIPMessage:
-    data = raw_data.decode("utf-8", errors="replace")
+    messages, remainder = split_sip_messages(raw_data)
+    if remainder:
+        raise ValueError("incomplete_sip_message")
+    if not messages:
+        raise ValueError("Empty SIP message")
+    if len(messages) > 1:
+        raise ValueError("parse_sip_message expects a single SIP message")
+
+    data = messages[0].decode("utf-8", errors="replace")
     sep_len = 4
     split_index = data.find("\r\n\r\n")
     if split_index == -1:
         split_index = data.find("\n\n")
         sep_len = 2
     if split_index == -1:
-        header_part = data
-        body = ""
-    else:
-        header_part = data[:split_index]
-        body = data[split_index + sep_len :]
+        raise ValueError("invalid_sip_message_missing_header_terminator")
+    header_part = data[:split_index]
+    body = data[split_index + sep_len :]
 
-    lines = [line.strip("\r") for line in header_part.splitlines() if line]
-    if not lines:
-        raise ValueError("Empty SIP message")
+    raw_lines = header_part.splitlines()
+    if not raw_lines:
+        raise ValueError("empty_sip_header")
+    lines = [line.rstrip("\r") for line in raw_lines]
 
     start = lines[0]
     msg = SIPMessage(body=body)
     if start.startswith("SIP/2.0"):
         parts = start.split(" ", 2)
+        if len(parts) < 2 or not parts[1].isdigit():
+            raise ValueError(f"Invalid status line: {start}")
         msg.version = parts[0]
         msg.status_code = int(parts[1])
         msg.reason = parts[2] if len(parts) > 2 else ""
@@ -97,21 +108,87 @@ def parse_sip_message(raw_data: bytes) -> SIPMessage:
         msg.method = parts[0].upper()
         msg.request_uri = parts[1]
         msg.version = parts[2]
+        if msg.version != SIP_VERSION:
+            raise ValueError(f"Unsupported SIP version: {msg.version}")
 
     current_header = None
     for line in lines[1:]:
+        if not line:
+            continue
         if line.startswith((" ", "\t")) and current_header:
             # Header folding continuation
             msg.headers[current_header][-1] += f" {line.strip()}"
             continue
         if ":" not in line:
-            continue
+            raise ValueError(f"invalid_header_line: {line}")
         key, value = line.split(":", 1)
         key = _normalize_header_name(key)
         current_header = key
         msg.add_header(key, value.strip())
 
+    if msg.is_request:
+        for required in ("Via", "From", "To", "Call-Id", "Cseq"):
+            if not msg.get(required):
+                raise ValueError(f"missing_required_header: {required}")
+
     return msg
+
+
+def _find_header_terminator(data: bytes, start: int = 0) -> tuple[int, int] | None:
+    idx = data.find(b"\r\n\r\n", start)
+    if idx != -1:
+        return idx, 4
+    idx = data.find(b"\n\n", start)
+    if idx != -1:
+        return idx, 2
+    return None
+
+
+def _extract_content_length(header_blob: bytes) -> int:
+    header_text = header_blob.decode("utf-8", errors="replace")
+    for line in header_text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key.strip().lower() in {"content-length", "l"}:
+            raw = value.strip()
+            if not raw.isdigit():
+                raise ValueError("invalid_content_length")
+            amount = int(raw)
+            if amount < 0 or amount > MAX_CONTENT_LENGTH:
+                raise ValueError("content_length_out_of_bounds")
+            return amount
+    return 0
+
+
+def split_sip_messages(buffer: bytes) -> tuple[list[bytes], bytes]:
+    """Split stream bytes into complete SIP messages plus trailing remainder."""
+    messages: list[bytes] = []
+    cursor = 0
+    total = len(buffer)
+
+    while cursor < total:
+        # Skip CRLF keepalive frames.
+        if buffer[cursor : cursor + 2] == b"\r\n":
+            cursor += 2
+            continue
+        if buffer[cursor : cursor + 1] == b"\n":
+            cursor += 1
+            continue
+
+        header = _find_header_terminator(buffer, cursor)
+        if not header:
+            break
+        header_end, sep_len = header
+        header_blob = buffer[cursor:header_end]
+        content_length = _extract_content_length(header_blob)
+        message_end = header_end + sep_len + content_length
+        if message_end > total:
+            break
+        messages.append(buffer[cursor:message_end])
+        cursor = message_end
+
+    return messages, buffer[cursor:]
 
 
 PARAM_RE = re.compile(r';\s*([a-zA-Z0-9\-_.!%*+`\'~]+)(?:=("[^"]*"|[^;]+))?')
@@ -250,3 +327,7 @@ def parse_sdp_media_port(sdp: str) -> Optional[int]:
 
 def random_branch() -> str:
     return "z9hG4bK" + os.urandom(6).hex()
+
+
+def secure_compare_digest(a: str, b: str) -> bool:
+    return hmac.compare_digest(a, b)

@@ -16,6 +16,9 @@ import csv
 import io
 import json
 import os
+import re
+import shutil
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -27,11 +30,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import pyotp
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.status import HTTP_401_UNAUTHORIZED
 import uvicorn
 from openpyxl import Workbook
@@ -43,75 +47,134 @@ from core.logging_utils import configure_json_logging, get_logger
 from core.security import (
     create_jwt,
     decode_jwt,
-    hash_password,
     verify_password,
 )
 
 LOGGER = get_logger("api-admin")
+VALID_PRESENCE_STATUSES = {"available", "busy", "away", "dnd", "offline"}
+TRUNK_TRANSPORTS = {"udp", "tcp", "tls"}
+TRUNK_AUTH_TYPES = {"credentials", "ip"}
+MAX_EXPORT_LIMIT = 5000
+MAX_CHAT_MESSAGE_LENGTH = 4096
+
+
+def _normalize_extension(value: str) -> str:
+    return value.strip()
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
-    otp_code: str | None = None
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+    otp_code: str | None = Field(default=None, min_length=6, max_length=16)
+
+    @field_validator("username")
+    @classmethod
+    def _username_strip(cls, value: str) -> str:
+        return value.strip()
 
 
 class ExtensionCreate(BaseModel):
-    extension: str = Field(pattern=r"^[0-9]+$")
-    display_name: str
-    auth_username: str
-    auth_password: str
-    voicemail_pin: str = "1234"
-    max_calls: int = 3
-    role: str = "user"
+    extension: str = Field(pattern=r"^[0-9]+$", min_length=2, max_length=15)
+    display_name: str = Field(min_length=1, max_length=128)
+    auth_username: str = Field(min_length=1, max_length=64)
+    auth_password: str = Field(min_length=6, max_length=128)
+    voicemail_pin: str = Field(default="1234", pattern=r"^[0-9]{4,10}$")
+    max_calls: int = Field(default=3, ge=1, le=100)
+    role: str = Field(default="user", min_length=1, max_length=32)
+
+    @field_validator("extension")
+    @classmethod
+    def _extension_strip(cls, value: str) -> str:
+        return _normalize_extension(value)
 
 
 class ExtensionUpdate(BaseModel):
-    display_name: str
-    auth_password: str
-    voicemail_pin: str
-    max_calls: int
-    role: str
+    display_name: str = Field(min_length=1, max_length=128)
+    auth_password: str = Field(min_length=6, max_length=128)
+    voicemail_pin: str = Field(pattern=r"^[0-9]{4,10}$")
+    max_calls: int = Field(ge=1, le=100)
+    role: str = Field(min_length=1, max_length=32)
     enabled: bool = True
 
 
 class TrunkCreate(BaseModel):
-    name: str
-    host: str
-    port: int = 5060
-    transport: str = "udp"
-    auth_type: str = "credentials"
-    username: str = ""
-    password: str = ""
-    outbound_prefix: str = ""
-    priority: int = 100
-    max_channels: int = 30
+    name: str = Field(min_length=1, max_length=128)
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=5060, ge=1, le=65535)
+    transport: str = Field(default="udp", min_length=3, max_length=8)
+    auth_type: str = Field(default="credentials", min_length=2, max_length=32)
+    username: str = Field(default="", max_length=128)
+    password: str = Field(default="", max_length=256)
+    outbound_prefix: str = Field(default="", max_length=16)
+    priority: int = Field(default=100, ge=1, le=10000)
+    max_channels: int = Field(default=30, ge=1, le=1000)
+
+    @field_validator("transport")
+    @classmethod
+    def _validate_transport(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in TRUNK_TRANSPORTS:
+            raise ValueError("invalid transport")
+        return normalized
+
+    @field_validator("auth_type")
+    @classmethod
+    def _validate_auth_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in TRUNK_AUTH_TYPES:
+            raise ValueError("invalid auth_type")
+        return normalized
 
 
 class DialplanRuleCreate(BaseModel):
-    name: str
-    pattern: str
-    action: str
-    target: str
-    priority: int = 100
+    name: str = Field(min_length=1, max_length=128)
+    pattern: str = Field(min_length=1, max_length=256)
+    action: str = Field(min_length=1, max_length=64)
+    target: str = Field(min_length=1, max_length=256)
+    priority: int = Field(default=100, ge=1, le=10000)
+
+    @field_validator("action")
+    @classmethod
+    def _validate_action(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"extension", "ring_group", "queue", "ivr", "trunk", "reject"}:
+            raise ValueError("invalid dialplan action")
+        return normalized
+
+    @field_validator("pattern")
+    @classmethod
+    def _validate_regex(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid regex: {exc}") from exc
+        return value
 
 
 class ChatRequest(BaseModel):
-    from_ext: str
-    to_ext: str
-    message: str
+    from_ext: str = Field(pattern=r"^[0-9]+$", min_length=2, max_length=15)
+    to_ext: str = Field(pattern=r"^[0-9]+$", min_length=2, max_length=15)
+    message: str = Field(min_length=1, max_length=MAX_CHAT_MESSAGE_LENGTH)
 
 
 class PresenceRequest(BaseModel):
-    extension: str
-    status: str
-    note: str = ""
+    extension: str = Field(pattern=r"^[0-9]+$", min_length=2, max_length=15)
+    status: str = Field(min_length=1, max_length=16)
+    note: str = Field(default="", max_length=256)
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in VALID_PRESENCE_STATUSES:
+            raise ValueError("invalid presence status")
+        return normalized
 
 
 class OriginateRequest(BaseModel):
-    from_ext: str
-    to_ext: str
-    call_id: str | None = None
+    from_ext: str = Field(pattern=r"^[0-9]+$", min_length=2, max_length=15)
+    to_ext: str = Field(pattern=r"^[0-9*#+]+$", min_length=1, max_length=32)
+    call_id: str | None = Field(default=None, max_length=128)
 
 
 def _now() -> int:
@@ -183,6 +246,55 @@ class AdminService:
             raise HTTPException(status_code=403, detail="Insufficient role")
         return claims
 
+    def _safe_limit(self, value: int, *, default: int = 100, max_value: int = MAX_EXPORT_LIMIT) -> int:
+        if value <= 0:
+            return default
+        return min(int(value), max_value)
+
+    def _sanitize_vendor(self, vendor: str) -> str:
+        normalized = vendor.strip().lower()
+        if not re.fullmatch(r"[a-z0-9_-]{2,32}", normalized):
+            raise HTTPException(status_code=400, detail="Invalid vendor")
+        return normalized
+
+    def _safe_recording_path(self, requested_path: str) -> Path:
+        target = Path(requested_path).resolve()
+        recording_root = Path(self.config.rtp.recording_path).resolve()
+        if target != recording_root and recording_root not in target.parents:
+            raise HTTPException(status_code=400, detail="Recording path not allowed")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Recording not found")
+        return target
+
+    def _safe_backup_source(self, backup_path: str) -> Path:
+        source = Path(backup_path).resolve()
+        allowed_root = self.backup_dir.resolve()
+        if source != allowed_root and allowed_root not in source.parents:
+            raise HTTPException(status_code=400, detail="Backup path not allowed")
+        if not source.exists() or not source.is_file():
+            raise HTTPException(status_code=404, detail="Backup file not found")
+        return source
+
+    def _backup_database(self, destination: Path) -> None:
+        source_db = Path(self.config.database.sqlite_path).resolve()
+        if not source_db.exists():
+            raise HTTPException(status_code=404, detail="Database not found")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(source_db) as src_conn:
+            with sqlite3.connect(destination) as dst_conn:
+                src_conn.backup(dst_conn)
+
+    def _restore_database(self, source: Path) -> None:
+        dst = Path(self.config.database.sqlite_path).resolve()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp_dst = dst.with_suffix(".restore-tmp")
+        if tmp_dst.exists():
+            tmp_dst.unlink()
+        with sqlite3.connect(source) as src_conn:
+            with sqlite3.connect(tmp_dst) as dst_conn:
+                src_conn.backup(dst_conn)
+        shutil.move(str(tmp_dst), str(dst))
+
     def _configure_routes(self):
         self.app.add_middleware(
             CORSMiddleware,
@@ -195,6 +307,15 @@ class AdminService:
         static_dir = self.web_dir / "static"
         static_dir.mkdir(parents=True, exist_ok=True)
         self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+        @self.app.exception_handler(RequestValidationError)
+        async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+            return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+        @self.app.exception_handler(Exception)
+        async def unhandled_exception_handler(_request: Request, exc: Exception):
+            LOGGER.exception("Unhandled API exception: %s", exc)
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
         @self.app.get("/health")
         async def health():
@@ -354,12 +475,14 @@ class AdminService:
         @self.app.get("/api/v1/cdr")
         async def cdr_history(request: Request, limit: int = 500):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            return {"items": self.db.cdr_history(limit)}
+            safe_limit = self._safe_limit(limit, default=500)
+            return {"items": self.db.cdr_history(safe_limit)}
 
         @self.app.get("/api/v1/cdr/export/csv")
         async def cdr_export_csv(request: Request, limit: int = 500):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            rows = self.db.cdr_history(limit)
+            safe_limit = self._safe_limit(limit, default=500)
+            rows = self.db.cdr_history(safe_limit)
             output = io.StringIO()
             writer = csv.DictWriter(
                 output,
@@ -390,7 +513,8 @@ class AdminService:
         @self.app.get("/api/v1/cdr/export/excel")
         async def cdr_export_excel(request: Request, limit: int = 500):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            rows = self.db.cdr_history(limit)
+            safe_limit = self._safe_limit(limit, default=500)
+            rows = self.db.cdr_history(safe_limit)
             wb = Workbook()
             ws = wb.active
             ws.title = "CDR"
@@ -425,14 +549,13 @@ class AdminService:
         @self.app.get("/api/v1/recordings")
         async def list_recordings(request: Request, limit: int = 200):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            return {"items": self.db.list_recordings(limit)}
+            safe_limit = self._safe_limit(limit, default=200, max_value=1000)
+            return {"items": self.db.list_recordings(safe_limit)}
 
         @self.app.get("/api/v1/recordings/download")
         async def download_recording(request: Request, path: str):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            file_path = Path(path)
-            if not file_path.exists() or not file_path.is_file():
-                raise HTTPException(status_code=404, detail="Recording not found")
+            file_path = self._safe_recording_path(path)
             return FileResponse(str(file_path))
 
         @self.app.get("/api/v1/voicemail/{extension}")
@@ -456,7 +579,8 @@ class AdminService:
         @self.app.get("/api/v1/chat/history")
         async def chat_history(request: Request, ext_a: str, ext_b: str, limit: int = 200):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            return {"items": self.db.chat_history(ext_a, ext_b, limit)}
+            safe_limit = self._safe_limit(limit, default=200, max_value=1000)
+            return {"items": self.db.chat_history(ext_a, ext_b, safe_limit)}
 
         @self.app.post("/api/v1/presence/set")
         async def set_presence(body: PresenceRequest, request: Request):
@@ -480,31 +604,26 @@ class AdminService:
         async def backup(request: Request):
             _ = self._admin_guard(request.headers.get("Authorization"))
             ts = _now()
-            db_path = Path(self.config.database.sqlite_path)
-            if not db_path.exists():
-                raise HTTPException(status_code=404, detail="Database not found")
             backup_path = self.backup_dir / f"smurf-backup-{ts}.db"
-            backup_path.write_bytes(db_path.read_bytes())
+            self._backup_database(backup_path)
             return {"ok": True, "path": str(backup_path)}
 
         @self.app.post("/api/v1/restore")
         async def restore(request: Request, backup_path: str):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            src = Path(backup_path)
-            dst = Path(self.config.database.sqlite_path)
-            if not src.exists():
-                raise HTTPException(status_code=404, detail="Backup file not found")
-            dst.write_bytes(src.read_bytes())
+            src = self._safe_backup_source(backup_path)
+            self._restore_database(src)
             return {"ok": True}
 
         @self.app.get("/api/v1/logs")
         async def get_logs(request: Request, limit: int = 200):
             _ = self._admin_guard(request.headers.get("Authorization"))
-            log_path = Path("/var/log/smurf/smurf.log")
+            log_path = Path(os.environ.get("SMURF_LOG_PATH", "/var/log/smurf/smurf.log"))
             if not log_path.exists():
                 return {"items": []}
+            safe_limit = self._safe_limit(limit, default=200, max_value=2000)
             lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            return {"items": lines[-limit:]}
+            return {"items": lines[-safe_limit:]}
 
         @self.app.post("/api/v1/tls/upload")
         async def upload_tls(
@@ -526,28 +645,34 @@ class AdminService:
         @self.app.get("/api/v1/provisioning/template/{vendor}")
         async def get_provisioning_template(vendor: str, request: Request):
             _ = self._admin_guard(request.headers.get("Authorization"))
+            safe_vendor = self._sanitize_vendor(vendor)
             tpl_dir = Path(self.config.provisioning.templates_path)
-            tpl_file = tpl_dir / f"{vendor.lower()}.tpl"
+            tpl_file = tpl_dir / f"{safe_vendor}.tpl"
             if not tpl_file.exists():
                 raise HTTPException(status_code=404, detail="Template not found")
             return Response(tpl_file.read_text(encoding="utf-8"), media_type="text/plain")
 
         @self.app.get("/provisioning/{vendor}/{extension}.cfg")
         async def provisioning_cfg(vendor: str, extension: str):
+            safe_vendor = self._sanitize_vendor(vendor)
             ext = self.db.get_extension(extension)
             if not ext:
                 raise HTTPException(status_code=404, detail="Unknown extension")
             tpl_dir = Path(self.config.provisioning.templates_path)
-            tpl_file = tpl_dir / f"{vendor.lower()}.tpl"
+            tpl_file = tpl_dir / f"{safe_vendor}.tpl"
             if not tpl_file.exists():
                 raise HTTPException(status_code=404, detail="Template not found")
             template = tpl_file.read_text(encoding="utf-8")
             payload = template.format(
                 EXTENSION=extension,
+                DISPLAY_NAME=ext.get("display_name", extension),
                 AUTH_USER=ext["auth_username"],
                 AUTH_PASS=ext["auth_password"],
                 SIP_SERVER=self.config.global_.domain,
                 SIP_PORT=self.config.sip.udp_port,
+                SIP_UDP_PORT=self.config.sip.udp_port,
+                SIP_TLS_PORT=self.config.sip.tls_port,
+                PROVISIONING_URL=self.config.provisioning.base_url,
             )
             return Response(payload, media_type="text/plain")
 

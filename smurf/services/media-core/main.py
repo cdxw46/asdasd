@@ -113,6 +113,7 @@ class MediaCoreService:
         )
         self.shutdown_event = asyncio.Event()
         self.sessions: dict[str, RTPSession] = {}
+        self.endpoint_index: dict[tuple[str, int], tuple[str, str]] = {}
         self.port_pool = list(range(self.config.rtp.min_port, self.config.rtp.max_port, 2))
         random.shuffle(self.port_pool)
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -124,6 +125,7 @@ class MediaCoreService:
         except OSError:
             LOGGER.warning("Unable to set DSCP on RTP socket")
         self.tasks: list[asyncio.Task] = []
+        self.recording_handles: dict[str, Any] = {}
 
         self.recording_dir = Path(self.config.rtp.recording_path)
         self.recording_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +163,12 @@ class MediaCoreService:
         for task in self.tasks:
             task.cancel()
         await self.command_server.stop()
+        for handle in list(self.recording_handles.values()):
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.recording_handles.clear()
         self.udp_socket.close()
 
     async def _rtp_loop(self):
@@ -182,28 +190,33 @@ class MediaCoreService:
         pt, seq, ts, _ssrc, header_len = parsed
         source_ip, source_port = addr
         now = time.time()
-
-        for session in self.sessions.values():
-            if source_ip == session.peer_a.ip and source_port == session.peer_a.rtp_port:
-                self._update_stats(session.stats_a_to_b, seq, ts, len(packet), now, session.sample_rate)
-                if pt == 101:  # default telephone-event dynamic PT
-                    event = _extract_telephone_event(packet[header_len:])
-                    if event is not None:
-                        session.stats_a_to_b.dtmf_events.append(event)
-                await self._relay_packet(packet, session.peer_b.ip, session.peer_b.rtp_port)
-                if session.record:
-                    self._append_recording_chunk(session.recording_path, packet)
-                return
-            if source_ip == session.peer_b.ip and source_port == session.peer_b.rtp_port:
-                self._update_stats(session.stats_b_to_a, seq, ts, len(packet), now, session.sample_rate)
-                if pt == 101:
-                    event = _extract_telephone_event(packet[header_len:])
-                    if event is not None:
-                        session.stats_b_to_a.dtmf_events.append(event)
-                await self._relay_packet(packet, session.peer_a.ip, session.peer_a.rtp_port)
-                if session.record:
-                    self._append_recording_chunk(session.recording_path, packet)
-                return
+        mapping = self.endpoint_index.get((source_ip, source_port))
+        if not mapping:
+            return
+        call_id, direction = mapping
+        session = self.sessions.get(call_id)
+        if not session:
+            self.endpoint_index.pop((source_ip, source_port), None)
+            return
+        if direction == "a_to_b":
+            self._update_stats(session.stats_a_to_b, seq, ts, len(packet), now, session.sample_rate)
+            if pt == 101:  # default telephone-event dynamic PT
+                event = _extract_telephone_event(packet[header_len:])
+                if event is not None:
+                    session.stats_a_to_b.dtmf_events.append(event)
+            await self._relay_packet(packet, session.peer_b.ip, session.peer_b.rtp_port)
+            if session.record:
+                self._append_recording_chunk(session.recording_path, packet)
+            return
+        self._update_stats(session.stats_b_to_a, seq, ts, len(packet), now, session.sample_rate)
+        if pt == 101:
+            event = _extract_telephone_event(packet[header_len:])
+            if event is not None:
+                session.stats_b_to_a.dtmf_events.append(event)
+        await self._relay_packet(packet, session.peer_a.ip, session.peer_a.rtp_port)
+        if session.record:
+            self._append_recording_chunk(session.recording_path, packet)
+        return
 
     async def _relay_packet(self, packet: bytes, ip: str, port: int):
         loop = asyncio.get_running_loop()
@@ -247,8 +260,44 @@ class MediaCoreService:
 
     def _append_recording_chunk(self, recording_path: str, packet: bytes):
         # Raw RTP dump storage (for post-processing conversion to WAV/MP3 by offline worker).
-        with open(recording_path, "ab") as f:
-            f.write(packet)
+        if not recording_path:
+            return
+        handle = self.recording_handles.get(recording_path)
+        if not handle:
+            handle = open(recording_path, "ab")
+            self.recording_handles[recording_path] = handle
+        handle.write(packet)
+
+    def _close_recording_handle(self, recording_path: str) -> None:
+        handle = self.recording_handles.pop(recording_path, None)
+        if not handle:
+            return
+        try:
+            handle.flush()
+            handle.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _parse_peer(self, payload: dict[str, Any], key: str) -> RTPPeer:
+        peer = payload.get(key, {})
+        if not isinstance(peer, dict):
+            raise ValueError(f"{key} must be an object")
+        ip = str(peer.get("ip", "")).strip()
+        if not ip:
+            raise ValueError(f"{key}.ip is required")
+        rtp_port_raw = str(peer.get("rtp_port", "")).strip()
+        if not rtp_port_raw.isdigit():
+            raise ValueError(f"{key}.rtp_port must be numeric")
+        rtp_port = int(rtp_port_raw)
+        if rtp_port <= 0 or rtp_port > 65535:
+            raise ValueError(f"{key}.rtp_port out of range")
+        rtcp_port_raw = str(peer.get("rtcp_port", "")).strip()
+        if rtcp_port_raw and not rtcp_port_raw.isdigit():
+            raise ValueError(f"{key}.rtcp_port must be numeric")
+        rtcp_port = int(rtcp_port_raw) if rtcp_port_raw else rtp_port + 1
+        if rtcp_port <= 0 or rtcp_port > 65535:
+            raise ValueError(f"{key}.rtcp_port out of range")
+        return RTPPeer(ip=ip, rtp_port=rtp_port, rtcp_port=rtcp_port)
 
     def _session_payload(self, session: RTPSession) -> dict[str, Any]:
         return {
@@ -298,34 +347,22 @@ class MediaCoreService:
                 return {"ok": False, "error": "missing call_id"}
             if call_id in self.sessions:
                 return {"ok": True, "session": self._session_payload(self.sessions[call_id])}
-
-            peer_a = payload.get("peer_a", {})
-            peer_b = payload.get("peer_b", {})
-            if not isinstance(peer_a, dict) or not isinstance(peer_b, dict):
-                return {"ok": False, "error": "invalid peers"}
+            try:
+                peer_a = self._parse_peer(payload, "peer_a")
+                peer_b = self._parse_peer(payload, "peer_b")
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
 
             session = RTPSession(
                 call_id=call_id,
                 codec=str(payload.get("codec", "PCMU")),
                 payload_type=int(payload.get("payload_type", 0)),
                 sample_rate=int(payload.get("sample_rate", 8000)),
-                peer_a=RTPPeer(
-                    ip=str(peer_a.get("ip", "127.0.0.1")),
-                    rtp_port=int(peer_a.get("rtp_port", self._allocate_rtp_port())),
-                    rtcp_port=int(peer_a.get("rtcp_port", 0)),
-                ),
-                peer_b=RTPPeer(
-                    ip=str(peer_b.get("ip", "127.0.0.1")),
-                    rtp_port=int(peer_b.get("rtp_port", self._allocate_rtp_port())),
-                    rtcp_port=int(peer_b.get("rtcp_port", 0)),
-                ),
+                peer_a=peer_a,
+                peer_b=peer_b,
                 created_at=int(time.time()),
                 record=bool(payload.get("record", False)),
             )
-            if session.peer_a.rtcp_port == 0:
-                session.peer_a.rtcp_port = session.peer_a.rtp_port + 1
-            if session.peer_b.rtcp_port == 0:
-                session.peer_b.rtcp_port = session.peer_b.rtp_port + 1
 
             if session.record:
                 recording_path = self.recording_dir / f"{call_id}.rtp"
@@ -333,6 +370,14 @@ class MediaCoreService:
                 recording_path.touch(exist_ok=True)
 
             self.sessions[call_id] = session
+            self.endpoint_index[(session.peer_a.ip, session.peer_a.rtp_port)] = (
+                call_id,
+                "a_to_b",
+            )
+            self.endpoint_index[(session.peer_b.ip, session.peer_b.rtp_port)] = (
+                call_id,
+                "b_to_a",
+            )
             started_at = int(time.time())
             self.db.execute(
                 """
@@ -365,12 +410,15 @@ class MediaCoreService:
             session = self.sessions.pop(call_id, None)
             if not session:
                 return {"ok": False, "error": "session_not_found"}
+            self.endpoint_index.pop((session.peer_a.ip, session.peer_a.rtp_port), None)
+            self.endpoint_index.pop((session.peer_b.ip, session.peer_b.rtp_port), None)
             ended_at = int(time.time())
             self.db.execute(
                 "UPDATE rtp_sessions SET ended_at = ? WHERE call_id = ?",
                 (ended_at, call_id),
             )
             if session.record and session.recording_path:
+                self._close_recording_handle(session.recording_path)
                 duration = max(0, ended_at - session.created_at)
                 self.db.add_recording(call_id, session.recording_path, session.codec, duration)
             return {"ok": True}
@@ -417,11 +465,13 @@ class MediaCoreService:
 
         if action == "export_state":
             path = str(payload.get("path", "/tmp/smurf_media_state.json"))
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
             dump = {
                 "sessions": [self._session_payload(s) for s in self.sessions.values()],
                 "timestamp": int(time.time()),
             }
-            Path(path).write_text(json.dumps(dump, indent=2), encoding="utf-8")
+            target.write_text(json.dumps(dump, indent=2), encoding="utf-8")
             return {"ok": True, "path": path}
 
         return {"ok": False, "error": f"unknown action: {action}"}

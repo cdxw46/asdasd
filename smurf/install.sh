@@ -98,7 +98,7 @@ enable_services() {
     smurf-provisioning.service
   )
   for service in "${managed_by_watchdog[@]}"; do
-    systemctl enable "${service}"
+    systemctl disable --now "${service}" >/dev/null 2>&1 || true
     systemctl stop "${service}" || true
   done
   systemctl enable --now smurf-watchdog.service

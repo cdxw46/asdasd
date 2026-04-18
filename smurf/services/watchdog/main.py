@@ -9,8 +9,10 @@ import argparse
 import asyncio
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -28,6 +30,10 @@ class ManagedService:
     command: list[str]
     process: asyncio.subprocess.Process | None = None
     restart_count: int = 0
+    first_started_at: float = 0.0
+    last_started_at: float = 0.0
+    cooldown_until: float = 0.0
+    healthy: bool = False
 
 
 class WatchdogService:
@@ -72,6 +78,11 @@ class WatchdogService:
             "api-admin",
             "provisioning",
         ]
+        self.max_restart_attempts = 20
+        self.restart_window_seconds = 300
+        self.restart_cooldown_seconds = 60
+        self.healthcheck_interval = 5
+        self.healthcheck_timeout = 2
 
     def _service_working_dir(self, svc: ManagedService) -> str:
         if len(svc.command) > 1:
@@ -92,12 +103,47 @@ class WatchdogService:
             await self._start_service(svc)
             await asyncio.sleep(0.5)
         monitor_task = asyncio.create_task(self._monitor_loop())
+        health_task = asyncio.create_task(self._health_loop())
 
         await self.shutdown_event.wait()
         monitor_task.cancel()
+        health_task.cancel()
         await self._stop_all()
 
     async def _start_service(self, svc: ManagedService):
+        now = time.time()
+        if svc.cooldown_until > now:
+            LOGGER.warning(
+                "service restart delayed by cooldown",
+                extra={
+                    "extra": {
+                        "service": svc.name,
+                        "cooldown_until": int(svc.cooldown_until),
+                    }
+                },
+            )
+            return
+        if (
+            svc.first_started_at > 0
+            and now - svc.first_started_at <= self.restart_window_seconds
+            and svc.restart_count >= self.max_restart_attempts
+        ):
+            svc.cooldown_until = now + self.restart_cooldown_seconds
+            svc.restart_count = 0
+            svc.first_started_at = now
+            LOGGER.error(
+                "service exceeded restart limit, entering cooldown",
+                extra={
+                    "extra": {
+                        "service": svc.name,
+                        "cooldown_seconds": self.restart_cooldown_seconds,
+                    }
+                },
+            )
+            return
+        if svc.first_started_at == 0 or now - svc.first_started_at > self.restart_window_seconds:
+            svc.first_started_at = now
+            svc.restart_count = 0
         LOGGER.info("starting service", extra={"extra": {"service": svc.name}})
         svc.process = await asyncio.create_subprocess_exec(
             *svc.command,
@@ -105,6 +151,8 @@ class WatchdogService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        svc.last_started_at = now
+        svc.healthy = False
         asyncio.create_task(self._pipe_logs(svc))
 
     async def _pipe_logs(self, svc: ManagedService):
@@ -133,6 +181,7 @@ class WatchdogService:
                 if svc.process.returncode is None:
                     continue
                 svc.restart_count += 1
+                svc.healthy = False
                 LOGGER.warning(
                     "service crashed, restarting",
                     extra={
@@ -145,6 +194,63 @@ class WatchdogService:
                 )
                 await self._start_service(svc)
 
+    def _health_command(self, service_name: str) -> dict[str, Any] | None:
+        if service_name == "pbx-core":
+            return {"action": "ping"}
+        if service_name == "media-core":
+            return {"action": "ping"}
+        if service_name == "sip-core":
+            return {"action": "ping"}
+        return None
+
+    async def _health_loop(self):
+        while True:
+            await asyncio.sleep(self.healthcheck_interval)
+            for svc in self.services:
+                if not svc.process or svc.process.returncode is not None:
+                    continue
+                if svc.name in {"api-admin", "provisioning"}:
+                    # For HTTP services, process liveness plus stdout heartbeat is enough here.
+                    svc.healthy = True
+                    continue
+                if self._health_command(svc.name) is None:
+                    continue
+                try:
+                    host, port = {
+                        "pbx-core": (
+                            self.config.bus.pbx_command_host,
+                            self.config.bus.pbx_command_port,
+                        ),
+                        "media-core": (
+                            self.config.bus.media_command_host,
+                            self.config.bus.media_command_port,
+                        ),
+                        "sip-core": (
+                            self.config.bus.sip_command_host,
+                            self.config.bus.sip_command_port,
+                        ),
+                    }[svc.name]
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, port),
+                        timeout=self.healthcheck_timeout,
+                    )
+                    writer.write((f'{{"action":"ping"}}\n').encode("utf-8"))
+                    await writer.drain()
+                    line = await asyncio.wait_for(
+                        reader.readline(), timeout=self.healthcheck_timeout
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    svc.healthy = bool(line)
+                except Exception:  # noqa: BLE001
+                    svc.healthy = False
+                    LOGGER.warning(
+                        "healthcheck failed, restarting service",
+                        extra={"extra": {"service": svc.name}},
+                    )
+                    if svc.process and svc.process.returncode is None:
+                        svc.process.terminate()
+
     async def _stop_all(self):
         for svc in self.services:
             if svc.process and svc.process.returncode is None:
@@ -153,6 +259,7 @@ class WatchdogService:
         for svc in self.services:
             if svc.process and svc.process.returncode is None:
                 svc.process.kill()
+            svc.healthy = False
 
 
 def parse_args() -> argparse.Namespace:

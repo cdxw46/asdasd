@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import secrets
 import signal
 import ssl
 import time
@@ -33,13 +34,17 @@ from core.config import load_config
 from core.db import Database
 from core.logging_utils import configure_json_logging, get_logger
 from core.sip import (
+    MAX_CONTENT_LENGTH,
     SIPMessage,
     build_response,
     digest_response as sip_digest_response,
     parse_aor,
     parse_auth_header,
     parse_contact_uri,
+    parse_uri_header,
     parse_sip_message,
+    secure_compare_digest,
+    split_sip_messages,
 )
 
 LOGGER = get_logger("sip-core")
@@ -71,13 +76,27 @@ class EndpointTransport:
     peer_port: int
 
 
+@dataclass(slots=True)
+class TransactionState:
+    response: SIPMessage
+    expires_at: float
+
+
+@dataclass(slots=True)
+class DialogState:
+    call_id: str
+    caller_extension: str
+    callee_extension: str
+    created_at: float
+
+
 class NonceStore:
     def __init__(self, ttl_seconds: int):
         self.ttl_seconds = ttl_seconds
         self.nonces: dict[str, int] = {}
 
     def create_nonce(self) -> str:
-        nonce = str(int(time.time() * 1000))
+        nonce = secrets.token_hex(16)
         self.nonces[nonce] = int(time.time()) + self.ttl_seconds
         return nonce
 
@@ -131,9 +150,27 @@ class SIPCoreService:
             handler=self._handle_command,
         )
         self.endpoint_transports: dict[str, EndpointTransport] = {}
+        self._sender_extensions: dict[int, set[str]] = defaultdict(set)
+        self.server_transactions: dict[str, TransactionState] = {}
+        self.dialogs: dict[str, DialogState] = {}
+        self.failed_auth_attempts: dict[str, deque[int]] = defaultdict(deque)
         self.udp_transport: asyncio.DatagramTransport | None = None
         self.shutdown_event = asyncio.Event()
         self.tasks: list[asyncio.Task] = []
+        self.supported_methods = {
+            "REGISTER",
+            "INVITE",
+            "ACK",
+            "BYE",
+            "CANCEL",
+            "MESSAGE",
+            "OPTIONS",
+            "INFO",
+            "UPDATE",
+            "REFER",
+            "NOTIFY",
+            "SUBSCRIBE",
+        }
 
     async def run(self):
         loop = asyncio.get_running_loop()
@@ -218,6 +255,7 @@ class SIPCoreService:
             await asyncio.sleep(5)
             self.nonces.cleanup()
             self.db.purge_expired_registrations()
+            self._cleanup_runtime_state()
 
     async def _handle_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action", "")).lower()
@@ -245,7 +283,163 @@ class SIPCoreService:
         return {"ok": False, "error": f"unknown action: {action}"}
 
     def _remember_transport(self, extension: str, transport: EndpointTransport):
+        previous = self.endpoint_transports.get(extension)
+        if previous:
+            previous_sender = id(previous.send_sip)
+            sender_extensions = self._sender_extensions.get(previous_sender)
+            if sender_extensions and extension in sender_extensions:
+                sender_extensions.discard(extension)
+                if not sender_extensions:
+                    self._sender_extensions.pop(previous_sender, None)
         self.endpoint_transports[extension] = transport
+        self._sender_extensions[id(transport.send_sip)].add(extension)
+
+    def _drop_sender_bindings(self, send_sip: Callable[[SIPMessage], Any]):
+        sender_id = id(send_sip)
+        self._sender_extensions.pop(sender_id, None)
+        stale_extensions = [
+            ext
+            for ext, transport in self.endpoint_transports.items()
+            if id(transport.send_sip) == sender_id
+        ]
+        for extension in stale_extensions:
+            self.endpoint_transports.pop(extension, None)
+
+    def _is_sender_allowed_for_extension(
+        self,
+        send_sip: Callable[[SIPMessage], Any],
+        extension: str,
+        peer_ip: str,
+        peer_port: int,
+    ) -> bool:
+        sender_id = id(send_sip)
+        if extension in self._sender_extensions.get(sender_id, set()):
+            return True
+        for reg in self.db.active_registrations():
+            if (
+                str(reg.get("extension", "")) == extension
+                and str(reg.get("source_ip", "")) == peer_ip
+                and int(reg.get("source_port", 0)) == peer_port
+            ):
+                return True
+        return False
+
+    def _transaction_key(self, msg: SIPMessage) -> str:
+        via = msg.get("Via", "")
+        params = parse_uri_header(via)
+        branch = params.get("branch", "")
+        cseq = msg.get("Cseq", "")
+        call_id = msg.get("Call-Id", "")
+        return f"{call_id}|{cseq}|{branch}"
+
+    def _cache_transaction_response(
+        self,
+        msg: SIPMessage,
+        response: SIPMessage,
+        ttl_seconds: int = 32,
+    ) -> None:
+        if msg.method == "ACK":
+            return
+        key = self._transaction_key(msg)
+        if not key:
+            return
+        self.server_transactions[key] = TransactionState(
+            response=response,
+            expires_at=time.time() + max(1, ttl_seconds),
+        )
+
+    def _cached_transaction_response(self, msg: SIPMessage) -> SIPMessage | None:
+        key = self._transaction_key(msg)
+        if not key:
+            return None
+        state = self.server_transactions.get(key)
+        if not state:
+            return None
+        if state.expires_at < time.time():
+            self.server_transactions.pop(key, None)
+            return None
+        return state.response
+
+    def _cleanup_runtime_state(self) -> None:
+        now = time.time()
+        stale_tx = [
+            key
+            for key, tx in self.server_transactions.items()
+            if tx.expires_at <= now
+        ]
+        for key in stale_tx:
+            self.server_transactions.pop(key, None)
+
+        stale_dialogs = [
+            call_id
+            for call_id, dialog in self.dialogs.items()
+            if now - dialog.created_at > 8 * 3600
+        ]
+        for call_id in stale_dialogs:
+            self.dialogs.pop(call_id, None)
+
+        window = int(self.config.security.failed_auth_window_seconds)
+        threshold_ms = int(time.time() * 1000) - (window * 1000)
+        for ip, bucket in list(self.failed_auth_attempts.items()):
+            while bucket and bucket[0] < threshold_ms:
+                bucket.popleft()
+            if not bucket:
+                self.failed_auth_attempts.pop(ip, None)
+
+    def _record_failed_auth(self, peer_ip: str) -> None:
+        now_ms = int(time.time() * 1000)
+        window = int(self.config.security.failed_auth_window_seconds)
+        threshold = int(self.config.security.failed_auth_block_threshold)
+        bucket = self.failed_auth_attempts[peer_ip]
+        oldest = now_ms - (window * 1000)
+        while bucket and bucket[0] < oldest:
+            bucket.popleft()
+        bucket.append(now_ms)
+        if len(bucket) >= threshold:
+            self.db.add_security_block(
+                peer_ip,
+                "digest_fail_threshold",
+                int(time.time()) + self.config.security.block_duration_seconds,
+            )
+
+    def _clear_failed_auth(self, peer_ip: str) -> None:
+        self.failed_auth_attempts.pop(peer_ip, None)
+
+    def _register_expires(self, msg: SIPMessage) -> int:
+        expires = self.config.sip.registration_max_expires
+        expires_header = (msg.get("Expires") or "").strip()
+        if expires_header.isdigit():
+            expires = int(expires_header)
+
+        contact = msg.get("Contact")
+        if contact:
+            contact_params = parse_uri_header(contact)
+            contact_expires = str(contact_params.get("expires", "")).strip()
+            if contact_expires.isdigit():
+                expires = int(contact_expires)
+
+        if expires == 0:
+            return 0
+        return max(
+            self.config.sip.registration_min_expires,
+            min(self.config.sip.registration_max_expires, expires),
+        )
+
+    def _send_response(
+        self,
+        request: SIPMessage,
+        response: SIPMessage,
+        send_sip: Callable[[SIPMessage], Any],
+        cache_final: bool = True,
+    ) -> None:
+        send_sip(response)
+        if (
+            cache_final
+            and response.status_code is not None
+            and response.status_code >= 200
+            and request.is_request
+        ):
+            self._cache_transaction_response(request, response)
 
     def _build_www_authenticate(self, algorithm: str) -> str:
         nonce = self.nonces.create_nonce()
@@ -291,7 +485,7 @@ class SIPCoreService:
             qop=qop,
             algorithm=algorithm,
         )
-        if expected != response:
+        if not secure_compare_digest(expected, response):
             return False, "digest_mismatch"
         return True, ext["extension"]
 
@@ -322,6 +516,12 @@ class SIPCoreService:
             )
             return
 
+        if msg.is_request:
+            cached = self._cached_transaction_response(msg)
+            if cached:
+                send_sip(cached)
+                return
+
         if not msg.is_request:
             LOGGER.info(
                 "Incoming SIP response",
@@ -336,6 +536,11 @@ class SIPCoreService:
             return
 
         method = msg.method or ""
+        if method not in self.supported_methods:
+            response = build_response(msg, 405, "Method Not Allowed")
+            self._send_response(msg, response, send_sip)
+            return
+
         if method == "REGISTER":
             await self._handle_register(msg, protocol, peer_ip, peer_port, send_sip)
             return
@@ -348,14 +553,16 @@ class SIPCoreService:
         if method == "BYE":
             await self._handle_bye(msg, send_sip)
             return
+        if method == "CANCEL":
+            await self._handle_cancel(msg, send_sip)
+            return
         if method == "MESSAGE":
-            await self._handle_message(msg, send_sip)
+            await self._handle_message(msg, peer_ip, peer_port, send_sip)
             return
         if method in {"OPTIONS", "INFO", "UPDATE", "REFER", "NOTIFY", "SUBSCRIBE"}:
-            send_sip(build_response(msg, 200, "OK"))
+            response = build_response(msg, 200, "OK")
+            self._send_response(msg, response, send_sip)
             return
-
-        send_sip(build_response(msg, 405, "Method Not Allowed"))
 
     async def _handle_register(
         self,
@@ -367,33 +574,24 @@ class SIPCoreService:
     ):
         valid, detail = self._validate_register_auth(msg)
         if not valid:
-            send_sip(
-                build_response(
-                    msg,
-                    401,
-                    "Unauthorized",
-                    extra_headers={
-                        "WWW-Authenticate": self._build_www_authenticate("MD5")
-                    },
-                )
+            response = build_response(
+                msg,
+                401,
+                "Unauthorized",
+                extra_headers={"WWW-Authenticate": self._build_www_authenticate("MD5")},
             )
-            if detail == "digest_mismatch":
-                self.db.add_security_block(
-                    peer_ip,
-                    "digest_fail",
-                    int(time.time()) + self.config.security.block_duration_seconds,
-                )
+            self._send_response(msg, response, send_sip)
+            self._record_failed_auth(peer_ip)
             return
 
         extension = detail
-        expires = self.config.sip.registration_max_expires
-        expires_header = msg.get("Expires")
-        if expires_header and expires_header.isdigit():
-            expires = int(expires_header)
-        expires = max(
-            self.config.sip.registration_min_expires,
-            min(self.config.sip.registration_max_expires, expires),
-        )
+        expires = self._register_expires(msg)
+        if expires == 0:
+            self.db.remove_registration(extension, peer_ip, peer_port)
+            response = build_response(msg, 200, "OK", extra_headers={"Expires": "0"})
+            self._send_response(msg, response, send_sip)
+            self._clear_failed_auth(peer_ip)
+            return
 
         contact = parse_contact_uri(msg.get("Contact")) or ""
         user_agent = msg.get("User-Agent", "")
@@ -417,7 +615,9 @@ class SIPCoreService:
             ),
         )
 
-        send_sip(build_response(msg, 200, "OK", extra_headers={"Expires": str(expires)}))
+        response = build_response(msg, 200, "OK", extra_headers={"Expires": str(expires)})
+        self._send_response(msg, response, send_sip)
+        self._clear_failed_auth(peer_ip)
 
     async def _handle_invite(
         self,
@@ -429,14 +629,25 @@ class SIPCoreService:
     ):
         from_ext = _header_to_extension(msg.get("From"))
         to_ext = _header_to_extension(msg.get("To"))
-        if not from_ext or not to_ext:
-            send_sip(build_response(msg, 400, "Bad Request"))
+        call_id = msg.get("Call-Id", "") or ""
+        if not from_ext or not to_ext or not call_id:
+            response = build_response(msg, 400, "Bad Request")
+            self._send_response(msg, response, send_sip)
             return
+        if not self._is_sender_allowed_for_extension(
+            send_sip, from_ext, peer_ip, peer_port
+        ):
+            response = build_response(msg, 403, "Forbidden")
+            self._send_response(msg, response, send_sip)
+            return
+
+        trying = build_response(msg, 100, "Trying")
+        self._send_response(msg, trying, send_sip, cache_final=False)
 
         pbx_result = await self.pbx_client.request(
             {
                 "action": "route_call",
-                "call_id": msg.get("Call-Id", ""),
+                "call_id": call_id,
                 "from_ext": from_ext,
                 "to_ext": to_ext,
                 "headers": _first_header_values(msg.headers),
@@ -449,13 +660,15 @@ class SIPCoreService:
             }
         )
         if pbx_result.get("status") != "ok":
-            send_sip(build_response(msg, 404, "Not Found"))
+            response = build_response(msg, 404, "Not Found")
+            self._send_response(msg, response, send_sip)
             return
 
         target_ext = str(pbx_result.get("target_extension", to_ext))
         target_transport = self.endpoint_transports.get(target_ext)
         if not target_transport:
-            send_sip(build_response(msg, 480, "Temporarily Unavailable"))
+            response = build_response(msg, 480, "Temporarily Unavailable")
+            self._send_response(msg, response, send_sip)
             return
 
         forwarded = SIPMessage(
@@ -469,8 +682,14 @@ class SIPCoreService:
                 forwarded.add_header(header, value)
 
         target_transport.send_sip(forwarded)
-        send_sip(build_response(msg, 100, "Trying"))
-        send_sip(build_response(msg, 180, "Ringing"))
+        ringing = build_response(msg, 180, "Ringing")
+        self._send_response(msg, ringing, send_sip, cache_final=False)
+        self.dialogs[call_id] = DialogState(
+            call_id=call_id,
+            caller_extension=from_ext,
+            callee_extension=target_ext,
+            created_at=time.time(),
+        )
 
     async def _handle_ack(self, msg: SIPMessage):
         call_id = msg.get("Call-Id", "")
@@ -486,17 +705,42 @@ class SIPCoreService:
         await self.pbx_client.request(
             {"action": "end_call", "call_id": call_id, "reason": "normal_clear"}
         )
-        send_sip(build_response(msg, 200, "OK"))
+        self.dialogs.pop(call_id, None)
+        response = build_response(msg, 200, "OK")
+        self._send_response(msg, response, send_sip)
+
+    async def _handle_cancel(
+        self,
+        msg: SIPMessage,
+        send_sip: Callable[[SIPMessage], Any],
+    ):
+        call_id = msg.get("Call-Id", "")
+        if call_id:
+            await self.pbx_client.request(
+                {"action": "end_call", "call_id": call_id, "reason": "cancelled"}
+            )
+            self.dialogs.pop(call_id, None)
+        response = build_response(msg, 200, "OK")
+        self._send_response(msg, response, send_sip)
 
     async def _handle_message(
         self,
         msg: SIPMessage,
+        peer_ip: str,
+        peer_port: int,
         send_sip: Callable[[SIPMessage], Any],
     ):
         from_ext = _header_to_extension(msg.get("From"))
         to_ext = _header_to_extension(msg.get("To"))
         if not from_ext or not to_ext:
-            send_sip(build_response(msg, 400, "Bad Request"))
+            response = build_response(msg, 400, "Bad Request")
+            self._send_response(msg, response, send_sip)
+            return
+        if not self._is_sender_allowed_for_extension(
+            send_sip, from_ext, peer_ip, peer_port
+        ):
+            response = build_response(msg, 403, "Forbidden")
+            self._send_response(msg, response, send_sip)
             return
 
         await self.pbx_client.request(
@@ -507,7 +751,8 @@ class SIPCoreService:
                 "message": msg.body,
             }
         )
-        send_sip(build_response(msg, 200, "OK"))
+        response = build_response(msg, 200, "OK")
+        self._send_response(msg, response, send_sip)
 
     async def _handle_tcp_client(
         self,
@@ -520,16 +765,27 @@ class SIPCoreService:
         def send_sip(msg: SIPMessage):
             writer.write(msg.to_bytes())
 
+        buffer = b""
         try:
             while not reader.at_eof():
                 data = await reader.read(65535)
                 if not data:
                     break
-                await self._handle_sip_message(
-                    data, "TCP", peer_ip, peer_port, send_sip
-                )
-                await writer.drain()
+                buffer += data
+                if len(buffer) > MAX_CONTENT_LENGTH * 2:
+                    LOGGER.warning(
+                        "TCP SIP buffer exceeded max size",
+                        extra={"extra": {"peer_ip": peer_ip, "peer_port": peer_port}},
+                    )
+                    break
+                messages, buffer = split_sip_messages(buffer)
+                for message in messages:
+                    await self._handle_sip_message(
+                        message, "TCP", peer_ip, peer_port, send_sip
+                    )
+                    await writer.drain()
         finally:
+            self._drop_sender_bindings(send_sip)
             writer.close()
             await writer.wait_closed()
 
@@ -544,16 +800,27 @@ class SIPCoreService:
         def send_sip(msg: SIPMessage):
             writer.write(msg.to_bytes())
 
+        buffer = b""
         try:
             while not reader.at_eof():
                 data = await reader.read(65535)
                 if not data:
                     break
-                await self._handle_sip_message(
-                    data, "TLS", peer_ip, peer_port, send_sip
-                )
-                await writer.drain()
+                buffer += data
+                if len(buffer) > MAX_CONTENT_LENGTH * 2:
+                    LOGGER.warning(
+                        "TLS SIP buffer exceeded max size",
+                        extra={"extra": {"peer_ip": peer_ip, "peer_port": peer_port}},
+                    )
+                    break
+                messages, buffer = split_sip_messages(buffer)
+                for message in messages:
+                    await self._handle_sip_message(
+                        message, "TLS", peer_ip, peer_port, send_sip
+                    )
+                    await writer.drain()
         finally:
+            self._drop_sender_bindings(send_sip)
             writer.close()
             await writer.wait_closed()
 
@@ -579,6 +846,8 @@ class SIPCoreService:
                 )
         except websockets.ConnectionClosed:
             pass
+        finally:
+            self._drop_sender_bindings(send_sip)
 
 
 class SIPUDPProtocol(asyncio.DatagramProtocol):

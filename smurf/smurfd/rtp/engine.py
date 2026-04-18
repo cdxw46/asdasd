@@ -33,6 +33,7 @@ from .codecs import (decode_to_pcm16, encode_from_pcm16, pcm_mix,
 from .jitter import JitterBuffer
 from .packet import (DtmfEvent, RtcpReportBlock, RtcpSR, RtpPacket,
                      build_rtcp_bye, build_rtcp_sr, parse_rtcp_compound)
+from .stun import stun_query
 
 log = get_logger("rtp")
 
@@ -169,6 +170,8 @@ class RtpLeg:
         self.local_sock = s_rtp
         self.local_rtcp = s_rtcp
         self.local_port = port
+        self.public_addr: Optional[Tuple[str, int]] = None
+        self.public_rtcp_addr: Optional[Tuple[str, int]] = None
         loop = asyncio.get_running_loop()
         rtp_t, rtp_p = await loop.create_datagram_endpoint(
             lambda: _RtpDatagram(self, False), sock=s_rtp,
@@ -180,6 +183,28 @@ class RtpLeg:
         self._rtcp_proto = rtcp_p
         self._rtcp_task = asyncio.create_task(self._rtcp_loop())
 
+    async def discover_public(self) -> Optional[Tuple[str, int]]:
+        """Pregunta a STUN para descubrir la dirección NAT mapeada de los
+        sockets RTP/RTCP. Devuelve la del RTP. Necesario para anunciar la
+        IP/puerto correcto en el SDP cuando se está detrás de NAT."""
+        if not self.local_sock:
+            return None
+        loop = asyncio.get_event_loop()
+        try:
+            res = await loop.run_in_executor(None, stun_query, self.local_sock, None, 2.0)
+        except Exception:
+            res = None
+        if res:
+            self.public_addr = res
+        if self.local_rtcp:
+            try:
+                res2 = await loop.run_in_executor(None, stun_query, self.local_rtcp, None, 2.0)
+            except Exception:
+                res2 = None
+            if res2:
+                self.public_rtcp_addr = res2
+        return self.public_addr
+
     def set_remote(self, host: str, port: int) -> None:
         self.remote_addr = (host, port)
         self.remote_rtcp = (host, port + 1)
@@ -188,24 +213,34 @@ class RtpLeg:
         # el RTP de retorno desde un trunk externo no llega a SMURF).
         self._send_nat_punches()
 
-    def _send_nat_punches(self, n: int = 4) -> None:
+    def _send_nat_punches(self, n: int = 8) -> None:
         if self.closed or not self.local_sock or not self.remote_addr:
             return
-        # Payload PCMU: 0xFF representa silencio en µ-law (160 muestras = 20 ms)
-        silence = b"\xff" * 160
+        silence_ulaw = b"\xff" * 160
+        silence_alaw = b"\xd5" * 160
         for _ in range(n):
             self.seq = (self.seq + 1) & 0xFFFF
             self.timestamp = (self.timestamp + 160) & 0xFFFFFFFF
+            payload = silence_alaw if (self.pt or 0) == 8 else silence_ulaw
             pkt = RtpPacket(payload_type=self.pt or 0, sequence=self.seq,
                             timestamp=self.timestamp, ssrc=self.ssrc_local,
-                            payload=silence if (self.pt or 0) == 0 else b"\xd5" * 160)
+                            payload=payload)
             try:
                 self.local_sock.sendto(pkt.serialize(), self.remote_addr)
                 self.stats.tx_pkts += 1
                 self._tx_pkts_since_sr += 1
-                self._tx_octets += len(silence)
+                self._tx_octets += len(payload)
             except Exception:
                 return
+        if self.local_rtcp and self.remote_rtcp:
+            try:
+                from .packet import build_rtcp_sr, RtcpSR
+                sr = RtcpSR(ssrc=self.ssrc_local, ntp_msw=0, ntp_lsw=0,
+                            rtp_ts=self.timestamp, pkt_count=self.stats.tx_pkts,
+                            octet_count=self._tx_octets & 0xFFFFFFFF, reports=[])
+                self.local_rtcp.sendto(build_rtcp_sr(sr), self.remote_rtcp)
+            except Exception:
+                pass
 
     async def close(self) -> None:
         if self.closed:
@@ -237,6 +272,9 @@ class RtpLeg:
         self.stats.rx_pkts += 1
         self.stats.rx_bytes += len(data)
         self.stats.last_rx = time.time()
+        if self.stats.rx_pkts in (1, 100, 500, 1000):
+            log.debug("Leg :%d rx_pkts=%d desde %s pt=%d",
+                      self.local_port, self.stats.rx_pkts, addr, pkt.payload_type)
         if self._auto_learn and (self.remote_addr is None or
                                  self.remote_addr[0] != addr[0]):
             self.remote_addr = addr

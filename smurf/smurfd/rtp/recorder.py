@@ -36,6 +36,10 @@ class CallRecorder:
         self._sample_rate = 8000
         self._frame_period_s = 0.020
         self._stop = False
+        self._rx_a_total = 0
+        self._rx_b_total = 0
+        self._a_pcm_total = 0
+        self._b_pcm_total = 0
 
         self._orig_a = leg_a.on_rtp
         leg_a.on_rtp = self._on_a
@@ -57,27 +61,48 @@ class CallRecorder:
             try: self._orig_a(pkt)
             except Exception: log.exception("orig leg_a callback")
         pcm, _ = decode_to_pcm16(pkt.payload, self.leg_a.pt)
+        self._rx_a_total += 1
         if pcm:
             self._a_q.append((time.time(), pcm))
+            self._a_pcm_total += 1
             self._flush()
 
     def _on_b(self, pkt: RtpPacket) -> None:
         if self._orig_b:
             try: self._orig_b(pkt)
             except Exception: log.exception("orig leg_b callback")
-        pcm, _ = decode_to_pcm16(pkt.payload, self.leg_b.pt) if self.leg_b else (b"", 8000)
+        self._rx_b_total += 1
+        if self.leg_b is None:
+            return
+        pcm, _ = decode_to_pcm16(pkt.payload, self.leg_b.pt)
         if pcm:
             self._b_q.append((time.time(), pcm))
+            self._b_pcm_total += 1
             self._flush()
 
     def _flush(self) -> None:
         if self._wav is None or self._stop:
             return
+        silence_frame = b"\x00" * 320  # 20 ms a 8 kHz / 16 bit
         if self.stereo:
-            while self._a_q and self._b_q:
-                _, a = self._a_q.popleft()
-                _, b = self._b_q.popleft()
+            # Estrategia: en cada flush avanzamos hasta agotar el lado más
+            # corto. Si un lado se queda muy atrás (no manda RTP por NAT/silencio)
+            # rellenamos su columna con silencio para no bloquear la grabación.
+            while True:
+                if self._a_q and self._b_q:
+                    _, a = self._a_q.popleft()
+                    _, b = self._b_q.popleft()
+                elif self._a_q and len(self._a_q) > 5:
+                    _, a = self._a_q.popleft()
+                    b = silence_frame
+                elif self._b_q and len(self._b_q) > 5:
+                    a = silence_frame
+                    _, b = self._b_q.popleft()
+                else:
+                    return
                 m = min(len(a), len(b))
+                if m == 0:
+                    continue
                 a, b = a[:m], b[:m]
                 inter = bytearray(m * 2)
                 for i in range(0, m, 2):
@@ -99,6 +124,9 @@ class CallRecorder:
         except Exception:
             log.exception("cerrando wav")
         dur = time.time() - self._started_at
+        log.info("Recorder stop: rx_a=%d (pcm=%d) rx_b=%d (pcm=%d) dur=%.1fs",
+                 self._rx_a_total, self._a_pcm_total,
+                 self._rx_b_total, self._b_pcm_total, dur)
         if hasattr(self, "_orig_a"):
             self.leg_a.on_rtp = self._orig_a
         if self.leg_b is not None and hasattr(self, "_orig_b"):

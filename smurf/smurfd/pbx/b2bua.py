@@ -335,7 +335,8 @@ class B2BUA:
         call.b.contact = binding.contact_uri
         call.b.transport = self._pick_transport(binding.endpoint.transport)
 
-        offer_sdp = build_audio_offer(self.public_ip, b_leg.local_port,
+        sdp_ip, sdp_port = await self._sdp_addr_for(b_leg, binding.endpoint.host)
+        offer_sdp = build_audio_offer(sdp_ip, sdp_port,
                                       ["PCMU", "PCMA", "telephone-event"])
         invite = self._make_b_invite(call, binding, offer_sdp.serialize())
         call.b.invite_request = invite
@@ -402,6 +403,19 @@ class B2BUA:
         self._by_b_callid[msg.call_id] = call.id
         return msg
 
+    async def _sdp_addr_for(self, leg: RtpLeg, peer_host: str) -> Tuple[str, int]:
+        if _is_private_ip(peer_host):
+            return ("127.0.0.1", leg.local_port)
+        try:
+            mapped = await leg.discover_public()
+        except Exception:
+            mapped = None
+        if mapped:
+            log.info("STUN: leg local %s:%d → público %s:%d",
+                     leg.allocator.bind, leg.local_port, mapped[0], mapped[1])
+            return mapped
+        return (self.public_ip, leg.local_port)
+
     def _build_local_contact(self, t: Transport) -> SipURI:
         scheme = "sips" if t.name in ("tls", "wss") else "sip"
         u = SipURI(scheme=scheme, user="smurf", host=self.public_ip,
@@ -467,8 +481,8 @@ class B2BUA:
         # Conectar leg a
         remote_a = am_a.connection or sdp_a_offer.connection or call.a.endpoint.host
         call.a.leg.set_remote(remote_a, am_a.port)
-        # PT lado A
-        ans_a = negotiate_audio(sdp_a_offer, self.public_ip, call.a.leg.local_port)
+        a_sdp_ip, a_sdp_port = await self._sdp_addr_for(call.a.leg, call.a.endpoint.host)
+        ans_a = negotiate_audio(sdp_a_offer, a_sdp_ip, a_sdp_port)
         if not ans_a:
             await self._cancel_b(call)
             return False
@@ -888,9 +902,11 @@ class B2BUA:
         b_leg = RtpLeg(self.rtp, pt=0); await b_leg.open()
         a_leg = RtpLeg(self.rtp, pt=0); await a_leg.open()
         call.a.leg = a_leg; call.b.leg = b_leg
-        body = build_audio_offer(self.public_ip, b_leg.local_port).serialize()
-        target_uri = SipURI(scheme="sip", user=call.dst_number,
-                            host=trunk["host"], port=trunk["port"])
+        sdp_ip, sdp_port = await self._sdp_addr_for(b_leg, trunk["host"])
+        body = build_audio_offer(sdp_ip, sdp_port).serialize()
+        # No incluimos puerto en la R-URI: muchos proxys devuelven 500/404 si
+        # el puerto está presente y es el por defecto. El puerto va en Endpoint.
+        target_uri = SipURI(scheme="sip", user=call.dst_number, host=trunk["host"])
         msg = SipMessage(is_request=True, method="INVITE", request_uri=target_uri)
         from_user = trunk["from_user"] or call.src_number or "anonymous"
         from_dom = trunk["from_domain"] or self.realm

@@ -36,7 +36,7 @@ SIP_PORT = 5060
 REALM = "smurf.local"
 EXT = "1000"
 PWD = "xD1fb3s3mMGVKg"
-TARGET = "music"  # → trunk antisip → music@sip.antisip.com (música de espera infinita)
+TARGET = "echo"  # → trunk iptel → echo@iptel.org
 
 
 def md5(s: str) -> str:
@@ -70,12 +70,11 @@ class SimpleUA:
         self.cseq = 0
         self.call_id = f"{secrets.token_hex(10)}@e2e.test"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("0.0.0.0", 0))
+        self.sock.bind(("127.0.0.1", 0))
         self.sock.settimeout(8.0)
-        self.host, self.port = self._lan_addr()
-        # RTP socket
+        self.host, self.port = self.sock.getsockname()
         self.rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.rtp_sock.bind(("0.0.0.0", 0))
+        self.rtp_sock.bind(("127.0.0.1", 0))
         self.rtp_sock.settimeout(0.05)
         self.rtp_local_port = self.rtp_sock.getsockname()[1]
         # RTP state
@@ -233,50 +232,57 @@ class SimpleUA:
         return (ip, m.port)
 
     def send_rtp_burst(self, duration_s=6.0):
-        """Envía un tono dial PCMU al peer durante N segundos y captura lo
-        que llegue de vuelta (eco) para verificar audio bidireccional."""
         if not self.remote_rtp:
             print("[RTP] no hay destino RTP remoto"); return
+        import threading
         print(f"[RTP] enviando hacia {self.remote_rtp}, recibiendo en :{self.rtp_local_port}")
-        # Generamos 1s de tono dial repetido
-        tone = dial_tone(1.0)  # PCM 16 bit 8 kHz
+        tone = dial_tone(1.0)
         bpf = samples_per_frame(0, 20) * 2
-        frames = []
-        i = 0
-        while i + bpf <= len(tone):
-            frames.append(tone[i:i+bpf]); i += bpf
-        total_frames = int(duration_s * 50)  # 50 frames/s
-        sent = 0
-        recv_bytes = 0
-        next_t = time.time()
-        ok_remote = None
-        for k in range(total_frames):
-            chunk = frames[k % len(frames)]
-            payload = encode_from_pcm16(chunk, 0)
-            self.rtp_seq = (self.rtp_seq + 1) & 0xFFFF
-            self.rtp_ts  = (self.rtp_ts + 160) & 0xFFFFFFFF
-            pkt = RtpPacket(payload_type=0, sequence=self.rtp_seq,
-                            timestamp=self.rtp_ts, ssrc=self.rtp_ssrc, payload=payload)
-            try:
-                self.rtp_sock.sendto(pkt.serialize(), self.remote_rtp); sent += 1
-            except Exception as e:
-                print(f"[RTP] send err: {e}"); break
-            # Drenar todo lo que haya llegado
-            try:
-                while True:
+        frames = [tone[i:i+bpf] for i in range(0, len(tone)-bpf+1, bpf)]
+        total = int(duration_s * 50)
+        stop = threading.Event()
+        sent = [0]
+        def tx():
+            self.rtp_sock.setblocking(True)
+            next_t = time.time()
+            for k in range(total):
+                if stop.is_set(): return
+                chunk = frames[k % len(frames)]
+                self.rtp_seq = (self.rtp_seq + 1) & 0xFFFF
+                self.rtp_ts = (self.rtp_ts + 160) & 0xFFFFFFFF
+                pkt = RtpPacket(payload_type=0, sequence=self.rtp_seq,
+                                timestamp=self.rtp_ts, ssrc=self.rtp_ssrc,
+                                payload=encode_from_pcm16(chunk, 0))
+                try:
+                    self.rtp_sock.sendto(pkt.serialize(), self.remote_rtp)
+                    sent[0] += 1
+                except Exception:
+                    return
+                next_t += 0.020
+                sl = next_t - time.time()
+                if sl > 0: time.sleep(sl)
+        def rx():
+            self.rtp_sock.settimeout(0.5)
+            ok = None
+            while not stop.is_set():
+                try:
                     data, addr = self.rtp_sock.recvfrom(2048)
-                    recv_bytes += len(data); self.recvd_pkts += 1
-                    if ok_remote is None:
-                        ok_remote = addr
-                        print(f"[RTP] primer paquete recibido desde {addr}, seq/ssrc detectado")
-            except socket.timeout:
-                pass
-            except BlockingIOError:
-                pass
-            next_t += 0.020
-            sl = next_t - time.time()
-            if sl > 0: time.sleep(sl)
-        print(f"[RTP] enviados={sent} paquetes, recibidos={self.recvd_pkts} paquetes ({recv_bytes} bytes)")
+                except socket.timeout:
+                    continue
+                except Exception:
+                    return
+                self.recvd_pkts += 1
+                if ok is None:
+                    ok = addr
+                    print(f"[RTP] primer paquete recibido desde {addr}")
+        ttx = threading.Thread(target=tx, daemon=True)
+        trx = threading.Thread(target=rx, daemon=True)
+        trx.start(); ttx.start()
+        ttx.join()
+        time.sleep(0.5)
+        stop.set()
+        trx.join(timeout=1)
+        print(f"[RTP] enviados={sent[0]} paquetes, recibidos={self.recvd_pkts} paquetes")
 
 
 def main():

@@ -1,0 +1,52 @@
+{
+  "log_level": "INFO",
+  "sip": {
+    "udp_bind": "0.0.0.0",
+    "udp_port": 5060,
+    "tcp_bind": "0.0.0.0",
+    "tcp_port": 5060,
+    "tls_bind": "0.0.0.0",
+    "tls_port": 5061,
+    "ws_bind": "0.0.0.0",
+    "ws_port": 5062,
+    "wss_bind": "0.0.0.0",
+    "wss_port": 5063,
+    "public_ip": "52.2.175.83",
+    "realm": "smurf.local",
+    "user_agent": "SMURF-PBX/1.0",
+    "registration_min_expires": 60,
+    "registration_default_expires": 3600,
+    "registration_max_expires": 7200
+  },
+  "rtp": {
+    "bind": "0.0.0.0",
+    "port_min": 16384,
+    "port_max": 16500,
+    "dscp": 46,
+    "max_silence_ms": 30000,
+    "enable_srtp": true
+  },
+  "web": {
+    "bind": "0.0.0.0",
+    "http_port": 5000,
+    "https_port": 5001,
+    "tls_cert": "/workspace/smurf/.tmp/certs/server.crt",
+    "tls_key": "/workspace/smurf/.tmp/certs/server.key",
+    "session_hours": 12
+  },
+  "storage": {
+    "db_path": "/workspace/smurf/.tmp/smurf.db",
+    "recordings_dir": "/workspace/smurf/.tmp/recordings",
+    "voicemail_dir": "/workspace/smurf/.tmp/voicemail",
+    "sounds_dir": "/workspace/smurf/.tmp/sounds",
+    "provisioning_dir": "/workspace/smurf/.tmp/provisioning",
+    "log_dir": "/workspace/smurf/.tmp/log"
+  },
+  "security": {
+    "fail2ban_window_sec": 300,
+    "fail2ban_max_failures": 8,
+    "fail2ban_ban_sec": 3600,
+    "rate_limit_per_ip_pps": 200,
+    "enable_2fa_admin": false
+  }
+}

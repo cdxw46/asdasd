@@ -183,6 +183,29 @@ class RtpLeg:
     def set_remote(self, host: str, port: int) -> None:
         self.remote_addr = (host, port)
         self.remote_rtcp = (host, port + 1)
+        # NAT keep-alive: enviar 3 paquetes RTP "comfort noise"/silencio para
+        # abrir el pinhole en cualquier NAT/firewall del operador (sin esto,
+        # el RTP de retorno desde un trunk externo no llega a SMURF).
+        self._send_nat_punches()
+
+    def _send_nat_punches(self, n: int = 4) -> None:
+        if self.closed or not self.local_sock or not self.remote_addr:
+            return
+        # Payload PCMU: 0xFF representa silencio en µ-law (160 muestras = 20 ms)
+        silence = b"\xff" * 160
+        for _ in range(n):
+            self.seq = (self.seq + 1) & 0xFFFF
+            self.timestamp = (self.timestamp + 160) & 0xFFFFFFFF
+            pkt = RtpPacket(payload_type=self.pt or 0, sequence=self.seq,
+                            timestamp=self.timestamp, ssrc=self.ssrc_local,
+                            payload=silence if (self.pt or 0) == 0 else b"\xd5" * 160)
+            try:
+                self.local_sock.sendto(pkt.serialize(), self.remote_addr)
+                self.stats.tx_pkts += 1
+                self._tx_pkts_since_sr += 1
+                self._tx_octets += len(silence)
+            except Exception:
+                return
 
     async def close(self) -> None:
         if self.closed:

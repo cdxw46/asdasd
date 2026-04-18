@@ -50,6 +50,17 @@ from .events import EventBus
 log = get_logger("pbx.b2bua")
 
 
+def _is_private_ip(ip: str) -> bool:
+    if not ip:
+        return False
+    try:
+        import ipaddress
+        a = ipaddress.ip_address(ip)
+        return a.is_private or a.is_loopback or a.is_link_local or a.is_unspecified
+    except Exception:
+        return False
+
+
 class CallState(str, Enum):
     INIT = "init"
     RINGING = "ringing"
@@ -421,6 +432,10 @@ class B2BUA:
         am_b = sdp_b.first_audio()
         # Configurar leg b según remote
         remote_ip = am_b.connection or sdp_b.connection or call.b.endpoint.host
+        if _is_private_ip(remote_ip):
+            log.info("Lado B anuncia IP privada %s, usando endpoint público %s",
+                     remote_ip, call.b.endpoint.host)
+            remote_ip = call.b.endpoint.host
         call.b.leg.set_remote(remote_ip, am_b.port)
         # PT acordado entre los formats que ofrecimos: el primero que NO sea telephone-event
         for pt in am_b.formats:
@@ -859,10 +874,12 @@ class B2BUA:
     # --------------------- Trunk (saliente) ---------------------
 
     async def _dial_trunk(self, call: Call, trunk_name: str) -> None:
+        tid = int(trunk_name) if trunk_name.isdigit() else -1
         trunk = await self.db.fetchone(
             "SELECT * FROM trunks WHERE (name=? OR id=?) AND enabled=1",
-            (trunk_name, trunk_name if trunk_name.isdigit() else -1),
+            (trunk_name, tid),
         )
+        log.info("Trunk lookup '%s' → %s", trunk_name, "OK" if trunk else "NOT FOUND")
         if not trunk:
             await call.a.server_tx.respond(503, "Service Unavailable")
             await self._end_call(call, "FAILED", "no-trunk")

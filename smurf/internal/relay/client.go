@@ -34,6 +34,25 @@ type closeReq struct {
 	ID  string `json:"id"`
 }
 
+// SRTPKeys holds base64-encoded 16-byte master key and 14-byte master salt for smurfrelay (RFC 3711).
+type SRTPKeys struct {
+	DecryptKey, DecryptSalt string
+	EncryptKey, EncryptSalt string
+}
+
+type srtpCmd struct {
+	Cmd          string `json:"cmd"`
+	ID           string `json:"id"`
+	ADecryptKey  string `json:"a_decrypt_key,omitempty"`
+	ADecryptSalt string `json:"a_decrypt_salt,omitempty"`
+	AEncryptKey  string `json:"a_encrypt_key,omitempty"`
+	AEncryptSalt string `json:"a_encrypt_salt,omitempty"`
+	BDecryptKey  string `json:"b_decrypt_key,omitempty"`
+	BDecryptSalt string `json:"b_decrypt_salt,omitempty"`
+	BEncryptKey  string `json:"b_encrypt_key,omitempty"`
+	BEncryptSalt string `json:"b_encrypt_salt,omitempty"`
+}
+
 func (c *Client) OpenSession(id string) (legA int, legB int, err error) {
 	return c.OpenSessionWithTap(id, "")
 }
@@ -73,4 +92,37 @@ func (c *Client) CloseSession(id string) {
 	}
 	defer conn.Close()
 	_ = json.NewEncoder(conn).Encode(closeReq{Cmd: "close", ID: id})
+}
+
+// ConfigureSRTP programs AES_CM_128_HMAC_SHA1_80 SDES contexts on an existing relay session (leg A = caller, leg B = callee).
+func (c *Client) ConfigureSRTP(id string, legA, legB SRTPKeys) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conn, err := net.Dial("tcp", c.addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(bufio.NewReader(conn))
+	cmd := srtpCmd{Cmd: "srtp", ID: id}
+	if legA.DecryptKey != "" {
+		cmd.ADecryptKey, cmd.ADecryptSalt = legA.DecryptKey, legA.DecryptSalt
+		cmd.AEncryptKey, cmd.AEncryptSalt = legA.EncryptKey, legA.EncryptSalt
+	}
+	if legB.DecryptKey != "" {
+		cmd.BDecryptKey, cmd.BDecryptSalt = legB.DecryptKey, legB.DecryptSalt
+		cmd.BEncryptKey, cmd.BEncryptSalt = legB.EncryptKey, legB.EncryptSalt
+	}
+	if err := enc.Encode(cmd); err != nil {
+		return err
+	}
+	var resp map[string]string
+	if err := dec.Decode(&resp); err != nil {
+		return err
+	}
+	if e := resp["error"]; e != "" {
+		return fmt.Errorf("%s", e)
+	}
+	return nil
 }

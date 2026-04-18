@@ -30,7 +30,7 @@ func (s *Server) handleInviteWebRTC(ctx context.Context, m *sip.Message, ws *wss
 		return sipResponse(m, 400, "Bad SDP JSON")
 	}
 	if _, err := s.pool.GetCallQueue(ctx, to); err == nil {
-		return s.handleInviteToQueue(ctx, ws, m, "ws", from, to, callID, callerReg)
+		return s.handleInviteToQueue(ctx, ws, m, "ws", from, to, callID, callerReg, nil, nil)
 	}
 	reg, err := s.pool.GetRegistration(ctx, to)
 	if err != nil {

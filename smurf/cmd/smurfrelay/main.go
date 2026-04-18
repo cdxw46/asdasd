@@ -9,6 +9,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/pion/srtp/v3"
 )
 
 type ctlOpen struct {
@@ -38,6 +40,11 @@ type session struct {
 	mu      sync.Mutex
 	addrA   *net.UDPAddr
 	addrB   *net.UDPAddr
+
+	decA *srtp.Context // decrypt RTP received on leg A (from caller)
+	encA *srtp.Context // encrypt RTP sent toward leg A (to caller)
+	decB *srtp.Context // decrypt RTP received on leg B (from callee)
+	encB *srtp.Context // encrypt RTP sent toward leg B (to callee)
 }
 
 var (
@@ -78,6 +85,24 @@ func handleControl(c net.Conn, bindIP string) {
 		id, _ := raw["id"].(string)
 		tap, _ := raw["tap_addr"].(string)
 		switch cmd {
+		case "srtp":
+			if id == "" {
+				_ = enc.Encode(map[string]string{"error": "missing id"})
+				continue
+			}
+			aDK, _ := raw["a_decrypt_key"].(string)
+			aDS, _ := raw["a_decrypt_salt"].(string)
+			aEK, _ := raw["a_encrypt_key"].(string)
+			aES, _ := raw["a_encrypt_salt"].(string)
+			bDK, _ := raw["b_decrypt_key"].(string)
+			bDS, _ := raw["b_decrypt_salt"].(string)
+			bEK, _ := raw["b_encrypt_key"].(string)
+			bES, _ := raw["b_encrypt_salt"].(string)
+			if err := applySRTPToSession(id, aDK, aDS, aEK, aES, bDK, bDS, bEK, bES); err != nil {
+				_ = enc.Encode(map[string]string{"error": err.Error()})
+				continue
+			}
+			_ = enc.Encode(map[string]string{"ok": "1"})
 		case "open":
 			if id == "" {
 				_ = enc.Encode(ctlOpenResp{Error: "missing id"})
@@ -176,15 +201,79 @@ func (s *session) forwardLoop(in, out *net.UDPConn, srcAddr, peerAddr **net.UDPA
 		}
 		dst := *peerAddr
 		tap := s.tapConn
+		var decIn, encOut *srtp.Context
+		if isLegA {
+			decIn = s.decA
+			encOut = s.encB
+		} else {
+			decIn = s.decB
+			encOut = s.encA
+		}
 		s.mu.Unlock()
+
+		pkt := buf[:n]
+		if decIn != nil {
+			pt, err := decryptRTPPacket(decIn, pkt)
+			if err != nil {
+				continue
+			}
+			pkt = pt
+		}
 		if isLegA && tap != nil {
-			_, _ = tap.Write(buf[:n])
+			_, _ = tap.Write(pkt)
 		}
 		if dst == nil {
 			continue
 		}
-		_, _ = out.WriteToUDP(buf[:n], dst)
+		outPkt := pkt
+		if encOut != nil {
+			ct, err := encryptRTPPacket(encOut, pkt)
+			if err != nil {
+				continue
+			}
+			outPkt = ct
+		}
+		_, _ = out.WriteToUDP(outPkt, dst)
 	}
+}
+
+func applySRTPToSession(id, aDK, aDS, aEK, aES, bDK, bDS, bEK, bES string) error {
+	sessionsMu.Lock()
+	s, ok := sessions[id]
+	sessionsMu.Unlock()
+	if !ok || s == nil {
+		return fmt.Errorf("no session")
+	}
+	var decA, encA, decB, encB *srtp.Context
+	var err error
+	if aDK != "" && aDS != "" {
+		decA, err = newSRTPDecryptContext(aDK, aDS)
+		if err != nil {
+			return err
+		}
+	}
+	if aEK != "" && aES != "" {
+		encA, err = newSRTPEncryptContext(aEK, aES)
+		if err != nil {
+			return err
+		}
+	}
+	if bDK != "" && bDS != "" {
+		decB, err = newSRTPDecryptContext(bDK, bDS)
+		if err != nil {
+			return err
+		}
+	}
+	if bEK != "" && bES != "" {
+		encB, err = newSRTPEncryptContext(bEK, bES)
+		if err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.decA, s.encA, s.decB, s.encB = decA, encA, decB, encB
+	s.mu.Unlock()
+	return nil
 }
 
 func closeSession(id string) {

@@ -242,6 +242,14 @@ func (s *Server) tearDownCall(br *callBridge, callID string) {
 		}
 		br.ivrWelcomeStop = nil
 	}
+	if br.queueMohStop != nil {
+		select {
+		case <-br.queueMohStop:
+		default:
+			close(br.queueMohStop)
+		}
+		br.queueMohStop = nil
+	}
 	if br.callRecording != nil {
 		_ = br.callRecording.Close()
 		br.callRecording = nil

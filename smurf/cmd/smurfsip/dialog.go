@@ -79,6 +79,13 @@ func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, _ string, 
 			close(br.ivrWelcomeStop)
 		}
 	}
+	if (m.Method == "BYE" || m.Method == "CANCEL") && br.queueMohStop != nil {
+		select {
+		case <-br.queueMohStop:
+		default:
+			close(br.queueMohStop)
+		}
+	}
 	if (m.Method == "BYE" || m.Method == "CANCEL") && br.voicemailRecorder != nil {
 		s.finalizeVoicemailDeposit(br)
 		s.tearDownCall(br, br.LegACallID)

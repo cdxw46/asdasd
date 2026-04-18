@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -12,12 +14,13 @@ import (
 	"github.com/smurf/pbx/internal/db"
 	"github.com/smurf/pbx/internal/sdp"
 	"github.com/smurf/pbx/internal/sip"
+	"github.com/smurf/pbx/internal/wavplay"
 	"github.com/smurf/pbx/internal/webhook"
 	"github.com/smurf/pbx/internal/webrtcmedia"
 	"github.com/smurf/pbx/internal/wssip"
 )
 
-func (s *Server) handleInviteToQueue(ctx context.Context, ws *wssip.Session, m *sip.Message, transport, from, queueSlug, callID string, callerReg *db.Registration) *sip.Message {
+func (s *Server) handleInviteToQueue(ctx context.Context, ws *wssip.Session, m *sip.Message, transport, from, queueSlug, callID string, callerReg *db.Registration, udpRaddr *net.UDPAddr, udpConn *net.UDPConn) *sip.Message {
 	q, err := s.pool.GetCallQueue(ctx, queueSlug)
 	if err != nil {
 		return sipResponse(m, 404, "Queue Not Found")
@@ -80,12 +83,50 @@ func (s *Server) handleInviteToQueue(ctx context.Context, ws *wssip.Session, m *
 	s.calls[callID+"-b"] = br
 	s.callMu.Unlock()
 
+	// MoH while hunting: 183 + PCMU RTP to plain UDP callers (not SRTP/WebRTC).
+	if !webrtc && !sdp.HasCrypto(callerOfferSDP) && transport == "udp" && udpConn != nil && udpRaddr != nil {
+		callerIP, callerPort := sdp.ParseRemoteMediaAddr(callerOfferSDP)
+		if callerIP != "" && callerPort > 0 {
+			earlySDP := sdp.PatchMediaEndpoint(sdp.BuildPCMU(s.publicIP, rtpA), s.publicIP, rtpA)
+			early := sipResponse(m, 183, "Session Progress")
+			early.Body = []byte(earlySDP)
+			early.AddHeader("Content-Type", "application/sdp")
+			early.AddHeader("Content-Length", strconv.Itoa(len(early.Body)))
+			if _, err := udpConn.WriteToUDP([]byte(early.String()), udpRaddr); err != nil {
+				log.Printf("queue 183: %v", err)
+			} else {
+				stop := make(chan struct{})
+				br.queueMohStop = stop
+				mohPath := getenv("SMURF_QUEUE_MOH_WAV", "/var/lib/smurf/moh/default.wav")
+				if _, err := os.Stat(mohPath); err == nil {
+					go func() {
+						_ = wavplay.StreamWAVPCMU(mohPath, s.relayBind, callerIP, callerPort, stop)
+					}()
+				}
+			}
+		}
+	}
+
 	ringEach := q.RingTimeoutSec
 	if ringEach <= 0 {
 		ringEach = 25
 	}
 	offerToCallee := sdp.PatchMediaEndpoint(callerOfferSDP, s.publicIP, rtpB)
+	if sdp.HasCrypto(callerOfferSDP) {
+		if km, err := sdp.GenerateSDESKeyMaterial(); err == nil {
+			offerToCallee = sdp.AppendSDES(sdp.StripCryptoLines(offerToCallee), 1, km)
+		}
+	}
 	picked, respB := s.queueSequential(ctx, m, transport, from, queueSlug, callID, members, offerToCallee, ringEach)
+
+	if br.queueMohStop != nil {
+		select {
+		case <-br.queueMohStop:
+		default:
+			close(br.queueMohStop)
+		}
+		br.queueMohStop = nil
+	}
 
 	if picked == nil || respB == nil {
 		s.tearDownCall(br, callID)
@@ -116,6 +157,7 @@ func (s *Server) handleInviteToQueue(ctx context.Context, ws *wssip.Session, m *
 		ack := ackToCallee(s, picked, m, respB, legCID)
 		_ = s.sendRequestFireAndForget(picked, ack)
 	}
+	s.configureRelaySRTPIfNeeded(callID, callerOfferSDP, string(respB.Body))
 
 	resp := sipResponse(m, respB.StatusCode, respB.Reason)
 	if t := respB.Headers.Get("to"); t != "" {
@@ -127,6 +169,9 @@ func (s *Server) handleInviteToQueue(ctx context.Context, ws *wssip.Session, m *
 		resp.AddHeader("Content-Type", "application/json")
 	} else {
 		answerToCaller := sdp.PatchMediaEndpoint(string(respB.Body), s.publicIP, rtpA)
+		if sdp.HasCrypto(callerOfferSDP) {
+			answerToCaller = sdp.PatchMediaEndpoint(callerOfferSDP, s.publicIP, rtpA)
+		}
 		resp.Body = []byte(answerToCaller)
 		resp.AddHeader("Content-Type", "application/sdp")
 	}
@@ -150,10 +195,6 @@ func (s *Server) queueSequential(ctx context.Context, m *sip.Message, transport,
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return reg, resp
-		}
-		if resp.StatusCode >= 100 && resp.StatusCode < 200 {
-			s.cancelOutboundLeg(reg, m, from, ext, legCID, out.Headers.Get("cseq"))
-			continue
 		}
 	}
 	return nil, nil

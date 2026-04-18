@@ -90,6 +90,9 @@ type callBridge struct {
 	// IVR (welcome WAV on relay leg B; DTMF via INFO)
 	ivrMenuSlug    string
 	ivrWelcomeStop chan struct{}
+
+	// Queue MoH (183 + WAV stream to caller RTP before answer)
+	queueMohStop chan struct{}
 }
 
 func main() {
@@ -205,6 +208,42 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// configureRelaySRTPIfNeeded sets smurfrelay crypto when both legs negotiate AES_CM_128_HMAC_SHA1_80 SDES.
+func (s *Server) configureRelaySRTPIfNeeded(callID, callerOffer, calleeAnswer string) {
+	if !sdp.HasCrypto(callerOffer) || !sdp.HasCrypto(calleeAnswer) {
+		return
+	}
+	_, suiteA, inlineA, okA := sdp.ParseFirstSDESCrypto(callerOffer)
+	_, suiteB, inlineB, okB := sdp.ParseFirstSDESCrypto(calleeAnswer)
+	if !okA || !okB {
+		return
+	}
+	if suiteA != "AES_CM_128_HMAC_SHA1_80" || suiteB != "AES_CM_128_HMAC_SHA1_80" {
+		return
+	}
+	callerKey, callerSalt, err := sdp.SDESInlineToKeySaltB64(inlineA)
+	if err != nil {
+		log.Printf("srtp caller inline: %v", err)
+		return
+	}
+	calleeKey, calleeSalt, err := sdp.SDESInlineToKeySaltB64(inlineB)
+	if err != nil {
+		log.Printf("srtp callee inline: %v", err)
+		return
+	}
+	legA := relay.SRTPKeys{
+		DecryptKey: callerKey, DecryptSalt: callerSalt,
+		EncryptKey: callerKey, EncryptSalt: callerSalt,
+	}
+	legB := relay.SRTPKeys{
+		DecryptKey: calleeKey, DecryptSalt: calleeSalt,
+		EncryptKey: calleeKey, EncryptSalt: calleeSalt,
+	}
+	if err := s.relay.ConfigureSRTP(callID, legA, legB); err != nil {
+		log.Printf("relay srtp: %v", err)
+	}
 }
 
 func (s *Server) OpenSessionWithTap(id, tap string) (int, int, error) {
@@ -543,7 +582,7 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	to = s.resolveInviteTarget(ctx, to)
 
 	if _, err := s.pool.GetCallQueue(ctx, to); err == nil {
-		return s.handleInviteToQueue(ctx, ws, m, transport, from, to, callID, callerReg)
+		return s.handleInviteToQueue(ctx, ws, m, transport, from, to, callID, callerReg, udpRaddr, udpConn)
 	}
 
 	if mb, ok := parseVoicemailDeposit(to); ok {
@@ -617,7 +656,13 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	s.callMu.Unlock()
 
 	// Patch SDP for callee offer: same codecs, our public IP, relay leg B
-	offerToCallee := sdp.PatchMediaEndpoint(string(m.Body), s.publicIP, rtpB)
+	callerOffer := string(m.Body)
+	offerToCallee := sdp.PatchMediaEndpoint(callerOffer, s.publicIP, rtpB)
+	if sdp.HasCrypto(callerOffer) {
+		if km, err := sdp.GenerateSDESKeyMaterial(); err == nil {
+			offerToCallee = sdp.AppendSDES(sdp.StripCryptoLines(offerToCallee), 1, km)
+		}
+	}
 
 	out := cloneRequest(m)
 	out.Method = "INVITE"
@@ -653,7 +698,12 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 		ack := ackToCallee(s, reg, m, respB, callID+"-b")
 		_ = s.sendRequestFireAndForget(reg, ack)
 	}
+	s.configureRelaySRTPIfNeeded(callID, callerOffer, string(respB.Body))
+
 	answerToCaller := sdp.PatchMediaEndpoint(string(respB.Body), s.publicIP, rtpA)
+	if sdp.HasCrypto(callerOffer) {
+		answerToCaller = sdp.PatchMediaEndpoint(callerOffer, s.publicIP, rtpA)
+	}
 
 	resp := sipResponse(m, respB.StatusCode, respB.Reason)
 	if t := respB.Headers.Get("to"); t != "" {

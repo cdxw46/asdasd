@@ -20,6 +20,7 @@ import (
 	"github.com/smurf/pbx/internal/relay"
 	"github.com/smurf/pbx/internal/sdp"
 	"github.com/smurf/pbx/internal/sip"
+	"github.com/smurf/pbx/internal/webhook"
 	"github.com/smurf/pbx/internal/wssip"
 )
 
@@ -67,6 +68,9 @@ type callBridge struct {
 	webrtcCleanup func()
 
 	callerReg *db.Registration // cached for BYE from callee toward UDP caller
+
+	// When destination is a call queue, extension that answered (for BYE routing).
+	queueCalleeExt string
 }
 
 func main() {
@@ -412,7 +416,7 @@ func (s *Server) handleRegister(ctx context.Context, ws *wssip.Session, m *sip.M
 	if ws != nil {
 		regTransport = "ws"
 		regHost = "0.0.0.0"
-		regPort = 0
+		regPort = 9 // placeholder; WS signaling uses wsSessions, not this port
 		regContact = "sip:" + ext + "@wss.invalid;transport=ws"
 	}
 	reg := db.Registration{
@@ -495,13 +499,6 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	if !verifyAuth(m.Method, m.RequestURI, string(m.Body), entry.params, creds, from, caller.Secret) {
 		return s.proxyChallenge(m)
 	}
-	if _, err := s.pool.GetExtension(ctx, to); err != nil {
-		return sipResponse(m, 404, "Not Found")
-	}
-	reg, err := s.pool.GetRegistration(ctx, to)
-	if err != nil {
-		return sipResponse(m, 480, "Temporarily Unavailable")
-	}
 	var callerReg *db.Registration
 	if cr, err := s.pool.GetRegistration(ctx, from); err == nil {
 		callerReg = cr
@@ -514,8 +511,21 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	}
 
 	callID := m.Headers.Get("call-id")
+
+	if _, err := s.pool.GetCallQueue(ctx, to); err == nil {
+		return s.handleInviteToQueue(ctx, ws, m, transport, from, to, callID, callerReg)
+	}
+
+	if _, err := s.pool.GetExtension(ctx, to); err != nil {
+		return sipResponse(m, 404, "Not Found")
+	}
+	reg, err := s.pool.GetRegistration(ctx, to)
+	if err != nil {
+		return sipResponse(m, 480, "Temporarily Unavailable")
+	}
+
 	if ws != nil && isWebRTCJSONInvite(m) {
-		return s.handleInviteWebRTC(ctx, m, ws, from, to, callID)
+		return s.handleInviteWebRTC(ctx, m, ws, from, to, callID, callerReg)
 	}
 
 	rtpA, rtpB, err := s.relay.OpenSession(callID)
@@ -560,16 +570,19 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	if err != nil || respB == nil {
 		s.tearDownCall(br, callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, "relay-fail")
+		go webhook.NotifyEnded(context.Background(), s.pool, cdrID)
 		return sipResponse(m, 504, "Server Timeout")
 	}
 	if respB.StatusCode >= 300 {
 		s.tearDownCall(br, callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, fmt.Sprintf("sip-%d", respB.StatusCode))
+		go webhook.NotifyEnded(context.Background(), s.pool, cdrID)
 		return sipResponse(m, respB.StatusCode, respB.Reason)
 	}
 	if respB.StatusCode == 200 {
 		_ = s.pool.UpdateCDRAnswered(ctx, cdrID)
-		ack := ackToCallee(s, reg, m, respB, callID)
+		go webhook.NotifyAnswered(context.Background(), s.pool, cdrID)
+		ack := ackToCallee(s, reg, m, respB, callID+"-b")
 		_ = s.sendRequestFireAndForget(reg, ack)
 	}
 	answerToCaller := sdp.PatchMediaEndpoint(string(respB.Body), s.publicIP, rtpA)

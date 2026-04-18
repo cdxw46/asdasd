@@ -7,6 +7,7 @@ import (
 
 	"github.com/smurf/pbx/internal/db"
 	"github.com/smurf/pbx/internal/sip"
+	"github.com/smurf/pbx/internal/webhook"
 )
 
 func (s *Server) bridgeForCallID(callID string) *callBridge {
@@ -27,7 +28,7 @@ func (s *Server) forwardMidDialogNoResponse(ctx context.Context, m *sip.Message,
 	var remote *db.Registration
 	var outCallID string
 	if cid == br.LegACallID {
-		reg, err := s.pool.GetRegistration(ctx, br.toExt)
+		reg, err := s.calleeRegistrationForBridge(ctx, br)
 		if err != nil {
 			return
 		}
@@ -70,7 +71,7 @@ func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, _ string, 
 	var remote *db.Registration
 	var outCallID string
 	if cid == br.LegACallID {
-		reg, err := s.pool.GetRegistration(ctx, br.toExt)
+		reg, err := s.calleeRegistrationForBridge(ctx, br)
 		if err != nil {
 			return sipResponse(m, 481, "Call/Transaction Does Not Exist")
 		}
@@ -108,6 +109,7 @@ func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, _ string, 
 	if m.Method == "BYE" || m.Method == "CANCEL" {
 		s.tearDownCall(br, br.LegACallID)
 		_ = s.pool.UpdateCDREnded(ctx, br.cdrID, m.Method)
+		go webhook.NotifyEnded(context.Background(), s.pool, br.cdrID)
 	}
 	return sipResponse(m, respB.StatusCode, respB.Reason)
 }

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,6 +136,73 @@ func main() {
 		default:
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/v1/webhooks", func(w http.ResponseWriter, r *http.Request) {
+		if !authBearer(w, r, *jwtSecret) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			list, err := pool.ListWebhooks(ctx)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			type row struct {
+				ID      int64    `json:"id"`
+				URL     string   `json:"url"`
+				Events  []string `json:"events"`
+				Enabled bool     `json:"enabled"`
+			}
+			out := make([]row, 0, len(list))
+			for _, h := range list {
+				out = append(out, row{ID: h.ID, URL: h.URL, Events: h.Events, Enabled: h.Enabled})
+			}
+			writeJSON(w, map[string]any{"webhooks": out})
+		case http.MethodPost:
+			var body struct {
+				URL    string   `json:"url"`
+				Secret string   `json:"secret"`
+				Events []string `json:"events"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad json", http.StatusBadRequest)
+				return
+			}
+			if body.URL == "" {
+				http.Error(w, "url required", http.StatusBadRequest)
+				return
+			}
+			id, err := pool.InsertWebhook(ctx, body.URL, body.Secret, body.Events)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, map[string]any{"id": id})
+		default:
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/webhooks/", func(w http.ResponseWriter, r *http.Request) {
+		if !authBearer(w, r, *jwtSecret) {
+			return
+		}
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		idStr := strings.TrimPrefix(r.URL.Path, "/api/v1/webhooks/")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id <= 0 {
+			http.NotFound(w, r)
+			return
+		}
+		if err := pool.DeleteWebhook(ctx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/v1/extensions/", func(w http.ResponseWriter, r *http.Request) {
 		if !authBearer(w, r, *jwtSecret) {
@@ -286,6 +354,13 @@ small{color:#64748b}
 <label>Secret</label><input id="nSec"/>
 <label>Display name</label><input id="nDisp"/>
 <button id="btnAdd">Create</button>
+<h2 style="margin-top:1.2rem">Webhooks</h2>
+<table><thead><tr><th>ID</th><th>URL</th><th>Events</th><th></th></tr></thead><tbody id="whRows"></tbody></table>
+<h3 style="margin-top:1rem">New webhook</h3>
+<label>URL</label><input id="whUrl" placeholder="https://example.com/hook"/>
+<label>Secret (HMAC)</label><input id="whSec"/>
+<label>Events (comma)</label><input id="whEv" value="call.answered,call.ended"/>
+<button id="btnWh">Add webhook</button>
 </div>
 <script>
 let token=null;
@@ -308,9 +383,24 @@ $('#btnLogin').onclick=async()=>{
     $('#mainBox').style.display='block';
     $('#who').textContent=$('#user').value;
     await refresh();
+    await refreshWh();
   }catch(e){$('#err').textContent=e.message||String(e)}
 };
 $('#btnOut').onclick=()=>{token=null;location.reload()};
+async function refreshWh(){
+  const j=await api('/api/v1/webhooks');
+  const tb=$('#whRows');tb.innerHTML='';
+  for(const w of j.webhooks){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+w.id+'</td><td style="word-break:break-all">'+w.url+'</td><td>'+(w.events||[]).join(', ')+'</td><td><button data-w="'+w.id+'">Delete</button></td>';
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll('button').forEach(b=>b.onclick=async()=>{
+    if(!confirm('Delete webhook '+b.dataset.w+'?'))return;
+    await fetch('/api/v1/webhooks/'+b.dataset.w,{method:'DELETE',headers:{Authorization:'Bearer '+token}});
+    await refreshWh();
+  });
+}
 async function refresh(){
   const j=await api('/api/v1/extensions');
   const tb=$('#rows');tb.innerHTML='';
@@ -331,6 +421,13 @@ $('#btnAdd').onclick=async()=>{
   $('#nNum').value='';$('#nSec').value='';$('#nDisp').value='';
   await refresh();
 };
+$('#btnWh').onclick=async()=>{
+  const ev=$('#whEv').value.split(',').map(s=>s.trim()).filter(Boolean);
+  await api('/api/v1/webhooks',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({url:$('#whUrl').value,secret:$('#whSec').value,events:ev})});
+  $('#whUrl').value='';$('#whSec').value='';
+  await refreshWh();
+};
 </script></body></html>`
 
 func openAPISpec() string {
@@ -341,7 +438,9 @@ func openAPISpec() string {
 "responses":{"200":{"description":"JWT"}}}},
 "/api/v1/extensions":{"get":{"security":[{"bearerAuth":[]}],"responses":{"200":{"description":"list"}}},
 "post":{"security":[{"bearerAuth":[]}],"responses":{"201":{"description":"created"}}}},
-"/api/v1/extensions/{number}":{"delete":{"security":[{"bearerAuth":[]}],"parameters":[{"name":"number","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"204":{"description":"deleted"}}}}
+"/api/v1/extensions/{number}":{"delete":{"security":[{"bearerAuth":[]}],"parameters":[{"name":"number","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"204":{"description":"deleted"}}}},
+"/api/v1/webhooks":{"get":{"security":[{"bearerAuth":[]}],"responses":{"200":{"description":"list"}}},"post":{"security":[{"bearerAuth":[]}],"responses":{"201":{"description":"created"}}}},
+"/api/v1/webhooks/{id}":{"delete":{"security":[{"bearerAuth":[]}],"parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],"responses":{"204":{"description":"deleted"}}}}
 },
 "components":{"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"JWT"}}}}`
 }

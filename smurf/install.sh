@@ -47,7 +47,9 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'smurf')\gexec
 SQL
 
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_queues_webhooks.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed_queues.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/migrate_transport_ws.sql" || true
 
 cat > /etc/smurf/smurf.env <<ENV

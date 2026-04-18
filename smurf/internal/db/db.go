@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -189,4 +190,138 @@ func (p *Pool) UpdateCDREnded(ctx context.Context, id int64, cause string) error
 		WHERE id = $1
 	`, id, cause)
 	return err
+}
+
+func (p *Pool) SetCDRQueue(ctx context.Context, id int64, queueSlug string) error {
+	_, err := p.Exec(ctx, `UPDATE cdr SET queue_slug = $2 WHERE id = $1`, id, queueSlug)
+	return err
+}
+
+type CDRRow struct {
+	ID          int64
+	CallID      string
+	FromExt     string
+	ToExt       string
+	Direction   string
+	QueueSlug   string
+	StartedAt   time.Time
+	AnsweredAt  sql.NullTime
+	EndedAt     sql.NullTime
+	DurationSec sql.NullInt32
+	HangupCause sql.NullString
+}
+
+func (p *Pool) GetCDR(ctx context.Context, id int64) (*CDRRow, error) {
+	var r CDRRow
+	var fromExt, toExt, queueSlug sql.NullString
+	err := p.QueryRow(ctx, `
+		SELECT id, call_id, from_ext, to_ext, direction, queue_slug,
+			started_at, answered_at, ended_at, duration_sec, hangup_cause
+		FROM cdr WHERE id = $1
+	`, id).Scan(&r.ID, &r.CallID, &fromExt, &toExt, &r.Direction, &queueSlug,
+		&r.StartedAt, &r.AnsweredAt, &r.EndedAt, &r.DurationSec, &r.HangupCause)
+	if err != nil {
+		return nil, err
+	}
+	if fromExt.Valid {
+		r.FromExt = fromExt.String
+	}
+	if toExt.Valid {
+		r.ToExt = toExt.String
+	}
+	if queueSlug.Valid {
+		r.QueueSlug = queueSlug.String
+	}
+	return &r, nil
+}
+
+// --- Call queues ---
+
+type CallQueue struct {
+	Slug            string
+	Name            string
+	Strategy        string
+	RingTimeoutSec  int
+}
+
+func (p *Pool) GetCallQueue(ctx context.Context, slug string) (*CallQueue, error) {
+	var q CallQueue
+	err := p.QueryRow(ctx, `
+		SELECT slug, name, strategy, ring_timeout_sec FROM call_queues WHERE slug = $1
+	`, slug).Scan(&q.Slug, &q.Name, &q.Strategy, &q.RingTimeoutSec)
+	if err != nil {
+		return nil, err
+	}
+	return &q, nil
+}
+
+func (p *Pool) ListQueueMemberExtensions(ctx context.Context, slug string) ([]string, error) {
+	rows, err := p.Query(ctx, `
+		SELECT m.extension_number
+		FROM call_queue_members m
+		WHERE m.queue_slug = $1
+		ORDER BY m.position, m.extension_number
+	`, slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ext string
+		if err := rows.Scan(&ext); err != nil {
+			return nil, err
+		}
+		out = append(out, ext)
+	}
+	return out, rows.Err()
+}
+
+// --- Webhooks ---
+
+type Webhook struct {
+	ID      int64
+	URL     string
+	Secret  string
+	Events  []string
+	Enabled bool
+}
+
+func (p *Pool) ListWebhooks(ctx context.Context) ([]Webhook, error) {
+	rows, err := p.Query(ctx, `SELECT id, url, secret, events, enabled FROM webhooks ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Webhook
+	for rows.Next() {
+		var w Webhook
+		if err := rows.Scan(&w.ID, &w.URL, &w.Secret, &w.Events, &w.Enabled); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+func (p *Pool) InsertWebhook(ctx context.Context, url, secret string, events []string) (int64, error) {
+	if len(events) == 0 {
+		events = []string{"call.ended"}
+	}
+	var id int64
+	err := p.QueryRow(ctx, `
+		INSERT INTO webhooks (url, secret, events) VALUES ($1,$2,$3) RETURNING id
+	`, url, secret, events).Scan(&id)
+	return id, err
+}
+
+func (p *Pool) DeleteWebhook(ctx context.Context, id int64) error {
+	ct, err := p.Exec(ctx, `DELETE FROM webhooks WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("webhook not found")
+	}
+	return nil
 }

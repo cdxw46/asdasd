@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,11 +16,17 @@ import (
 )
 
 func (s *Server) sendRequestToUA(ctx context.Context, reg *db.Registration, req *sip.Message) (*sip.Message, error) {
+	return s.sendRequestToUAWithDeadline(ctx, reg, req, 32*time.Second)
+}
+
+func (s *Server) sendRequestToUAWithDeadline(ctx context.Context, reg *db.Registration, req *sip.Message, d time.Duration) (*sip.Message, error) {
+	dctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
 	switch reg.Transport {
 	case "ws":
-		return s.sendRequestOverWS(reg, req)
+		return s.sendRequestOverWS(dctx, reg, req)
 	default:
-		return s.sendRequestUDPOrTCP(ctx, reg, req)
+		return s.sendRequestUDPOrTCP(dctx, reg, req)
 	}
 }
 
@@ -78,10 +85,21 @@ func (s *Server) sendRequestUDPOrTCP(ctx context.Context, reg *db.Registration, 
 	buf := make([]byte, 0, 65536)
 	tmp := make([]byte, 4096)
 	deadline := time.Now().Add(32 * time.Second)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		_ = c.SetReadDeadline(deadline)
 		n, err := c.Read(tmp)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
+				return nil, ctx.Err()
+			}
 			return nil, err
 		}
 		buf = append(buf, tmp[:n]...)
@@ -105,7 +123,7 @@ func (s *Server) sendRequestUDPOrTCP(ctx context.Context, reg *db.Registration, 
 	}
 }
 
-func (s *Server) sendRequestOverWS(reg *db.Registration, req *sip.Message) (*sip.Message, error) {
+func (s *Server) sendRequestOverWS(ctx context.Context, reg *db.Registration, req *sip.Message) (*sip.Message, error) {
 	callee := s.wsSessionFor(reg.Extension)
 	if callee == nil {
 		return nil, fmt.Errorf("callee not connected on websocket")
@@ -127,9 +145,17 @@ func (s *Server) sendRequestOverWS(reg *db.Registration, req *sip.Message) (*sip
 	if err := callee.WriteText([]byte(req.String())); err != nil {
 		return nil, err
 	}
-	deadline := time.After(32 * time.Second)
+	wait := 32 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d > 0 {
+			wait = d
+		}
+	}
+	deadline := time.After(wait)
 	for {
 		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		case msg := <-ch:
 			if msg == nil {
 				continue
@@ -181,7 +207,7 @@ func sipContactRequestURI(resp *sip.Message, fallback string) string {
 	return contactURI(c)
 }
 
-func ackToCallee(s *Server, reg *db.Registration, inv *sip.Message, resp200 *sip.Message, callID string) *sip.Message {
+func ackToCallee(s *Server, reg *db.Registration, inv *sip.Message, resp200 *sip.Message, legCallID string) *sip.Message {
 	ru := sipContactRequestURI(resp200, reg.ContactURI)
 	ack := &sip.Message{
 		StartLine: sip.StartLine{IsRequest: true, Method: "ACK", RequestURI: ru, Proto: "SIP/2.0"},
@@ -193,7 +219,7 @@ func ackToCallee(s *Server, reg *db.Registration, inv *sip.Message, resp200 *sip
 	if t := resp200.Headers.Get("to"); t != "" {
 		ack.AddHeader("To", t)
 	}
-	ack.AddHeader("Call-ID", callID+"-b")
+	ack.AddHeader("Call-ID", legCallID)
 	parts := strings.Fields(inv.Headers.Get("cseq"))
 	if len(parts) > 0 {
 		ack.AddHeader("CSeq", parts[0]+" ACK")

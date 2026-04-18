@@ -11,6 +11,7 @@ import (
 	"github.com/smurf/pbx/internal/sdp"
 	"github.com/smurf/pbx/internal/sip"
 	"github.com/smurf/pbx/internal/webrtcmedia"
+	"github.com/smurf/pbx/internal/webhook"
 	"github.com/smurf/pbx/internal/wssip"
 )
 
@@ -19,7 +20,7 @@ type webrtcInviteBody struct {
 	SDP  string `json:"sdp"`
 }
 
-func (s *Server) handleInviteWebRTC(ctx context.Context, m *sip.Message, ws *wssip.Session, from, to, callID string) *sip.Message {
+func (s *Server) handleInviteWebRTC(ctx context.Context, m *sip.Message, ws *wssip.Session, from, to, callID string, callerReg *db.Registration) *sip.Message {
 	ct := strings.ToLower(m.Headers.Get("content-type"))
 	if !strings.Contains(ct, "json") {
 		return sipResponse(m, 415, "Unsupported Media Type")
@@ -27,6 +28,9 @@ func (s *Server) handleInviteWebRTC(ctx context.Context, m *sip.Message, ws *wss
 	var wrap webrtcInviteBody
 	if err := json.Unmarshal(m.Body, &wrap); err != nil || wrap.SDP == "" {
 		return sipResponse(m, 400, "Bad SDP JSON")
+	}
+	if _, err := s.pool.GetCallQueue(ctx, to); err == nil {
+		return s.handleInviteToQueue(ctx, ws, m, "ws", from, to, callID, callerReg)
 	}
 	reg, err := s.pool.GetRegistration(ctx, to)
 	if err != nil {
@@ -43,6 +47,7 @@ func (s *Server) handleInviteWebRTC(ctx context.Context, m *sip.Message, ws *wss
 	if err != nil {
 		s.relay.CloseSession(callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, "webrtc-fail")
+		go webhook.NotifyEnded(context.Background(), s.pool, cdrID)
 		return sipResponse(m, 500, "WebRTC Error")
 	}
 
@@ -66,37 +71,24 @@ func (s *Server) handleInviteWebRTC(ctx context.Context, m *sip.Message, ws *wss
 	if err != nil || respB == nil {
 		s.relay.CloseSession(callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, "timeout")
+		go webhook.NotifyEnded(context.Background(), s.pool, cdrID)
 		cleanup()
 		return sipResponse(m, 504, "Server Timeout")
 	}
 	if respB.StatusCode >= 300 {
 		s.relay.CloseSession(callID)
 		_ = s.pool.UpdateCDREnded(ctx, cdrID, "sip-error")
+		go webhook.NotifyEnded(context.Background(), s.pool, cdrID)
 		cleanup()
 		return sipResponse(m, respB.StatusCode, respB.Reason)
 	}
 	if respB.StatusCode == 200 {
 		_ = s.pool.UpdateCDRAnswered(ctx, cdrID)
-		ack := &sip.Message{
-			StartLine: sip.StartLine{IsRequest: true, Method: "ACK", RequestURI: reg.ContactURI, Proto: "SIP/2.0"},
-			Headers:   sip.HeaderMap{},
-		}
-		ack.AddHeader("Via", s.sipViaUDP())
-		ack.AddHeader("Max-Forwards", "70")
-		ack.AddHeader("From", m.Headers.Get("from"))
-		if t := respB.Headers.Get("to"); t != "" {
-			ack.AddHeader("To", t)
-		}
-		ack.AddHeader("Call-ID", callID+"-b")
-		ack.AddHeader("CSeq", strings.Fields(m.Headers.Get("cseq"))[0]+" ACK")
-		ack.AddHeader("Content-Length", "0")
+		go webhook.NotifyAnswered(context.Background(), s.pool, cdrID)
+		ack := ackToCallee(s, reg, m, respB, callID+"-b")
 		_ = s.sendRequestFireAndForget(reg, ack)
 	}
 
-	var callerReg *db.Registration
-	if cr, err := s.pool.GetRegistration(ctx, from); err == nil {
-		callerReg = cr
-	}
 	br := &callBridge{
 		LegACallID:    callID,
 		LegBCallID:    callID + "-b",

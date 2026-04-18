@@ -20,7 +20,7 @@ import (
 	"smurf/internal/util"
 )
 
-//go:embed ../../web/*
+//go:embed web/*
 var webFS embed.FS
 
 type Server struct {
@@ -208,6 +208,15 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if extensions == nil {
+		extensions = []db.Extension{}
+	}
+	if registrations == nil {
+		registrations = []db.Registration{}
+	}
+	if cdr == nil {
+		cdr = []db.CDR{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"extensions":    extensions,
 		"registrations": registrations,
@@ -238,7 +247,7 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 type ctxKeyClaims struct{}
 
 func (s *Server) staticHandler() http.Handler {
-	sub, err := fs.Sub(webFS, "../../web")
+	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
 		panic(err)
 	}

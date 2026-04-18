@@ -1,0 +1,35 @@
+{
+  "domain": "127.0.0.1",
+  "realm": "127.0.0.1",
+  "data_dir": "/workspace/smurf/.tmp/data",
+  "log_level": "INFO",
+  "database": {"path": "/workspace/smurf/.tmp/data/smurf.db"},
+  "sip": {
+    "udp": "127.0.0.1:15060",
+    "tcp": "127.0.0.1:15060",
+    "tls": "127.0.0.1:15061",
+    "tls_cert": "/workspace/smurf/.tmp/tls/server.crt",
+    "tls_key": "/workspace/smurf/.tmp/tls/server.key",
+    "nonce_ttl_seconds": 300
+  },
+  "rtp": {
+    "bind_ip": "127.0.0.1",
+    "public_ip": "127.0.0.1",
+    "start_port": 22000,
+    "end_port": 22020,
+    "dscp": 46
+  },
+  "http": {
+    "https": "127.0.0.1:15001",
+    "tls_cert": "/workspace/smurf/.tmp/tls/server.crt",
+    "tls_key": "/workspace/smurf/.tmp/tls/server.key"
+  },
+  "security": {
+    "jwt_secret": "dev-secret",
+    "admin_username": "admin",
+    "admin_password": "admin123!",
+    "fail_threshold": 5,
+    "block_seconds": 900,
+    "admin_token_hours": 12
+  }
+}

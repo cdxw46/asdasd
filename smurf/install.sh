@@ -88,12 +88,19 @@ JSON
 fi
 
 install -m 0644 "${SCRIPT_DIR}/deploy/systemd/smurfd.service" "${SYSTEMD_DIR}/${SERVICE_NAME}"
-systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
-systemctl restart "${SERVICE_NAME}"
+
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}"
+  systemctl restart "${SERVICE_NAME}"
+  SERVICE_STATUS="systemd service enabled and restarted"
+else
+  SERVICE_STATUS="systemd unit installed but not started (systemd not available in this environment)"
+fi
 
 echo
 echo "SMURF installed."
 echo "Admin UI: https://$(hostname -I | awk '{print $1}'):5001"
 echo "Default admin: admin / admin123!"
 echo "Default extension: 1000 / 12345"
+echo "Service status: ${SERVICE_STATUS}"

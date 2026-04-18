@@ -107,7 +107,6 @@ func ReadMessage(reader *bufio.Reader) (*Message, error) {
 		// Continue to body parsing below for messages where only body is missing.
 	}
 
-	headerPart := raw.String()
 	contentLen := 0
 	if tmp != nil {
 		if v := tmp.GetHeader("Content-Length"); v != "" {

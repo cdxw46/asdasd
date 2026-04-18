@@ -7,6 +7,7 @@ import (
 
 	"github.com/smurf/pbx/internal/db"
 	"github.com/smurf/pbx/internal/sip"
+	"github.com/smurf/pbx/internal/trunk"
 	"github.com/smurf/pbx/internal/webhook"
 )
 
@@ -22,6 +23,9 @@ func (s *Server) bridgeForCallID(callID string) *callBridge {
 func (s *Server) forwardMidDialogNoResponse(ctx context.Context, m *sip.Message, transport string) {
 	br := s.bridgeForCallID(m.Headers.Get("call-id"))
 	if br == nil {
+		return
+	}
+	if m.Method == "ACK" && br.voicemailRecorder != nil {
 		return
 	}
 	cid := m.Headers.Get("call-id")
@@ -68,6 +72,20 @@ func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, _ string, 
 		return sipResponse(m, 481, "Call/Transaction Does Not Exist")
 	}
 	cid := m.Headers.Get("call-id")
+	if (m.Method == "BYE" || m.Method == "CANCEL") && br.voicemailRecorder != nil {
+		s.finalizeVoicemailDeposit(br)
+		s.tearDownCall(br, br.LegACallID)
+		_ = s.pool.UpdateCDREnded(ctx, br.cdrID, m.Method)
+		go webhook.NotifyEnded(context.Background(), s.pool, br.cdrID)
+		return sipResponse(m, 200, "OK")
+	}
+	if (m.Method == "BYE" || m.Method == "CANCEL") && cid == br.LegACallID && br.outboundTrunk != nil && br.trunkDialog != nil {
+		_ = trunk.SendBYE(br.outboundTrunk, br.trunkDialog, s.publicIP, s.sipPort)
+		s.tearDownCall(br, br.LegACallID)
+		_ = s.pool.UpdateCDREnded(ctx, br.cdrID, m.Method)
+		go webhook.NotifyEnded(context.Background(), s.pool, br.cdrID)
+		return sipResponse(m, 200, "OK")
+	}
 	var remote *db.Registration
 	var outCallID string
 	if cid == br.LegACallID {

@@ -325,3 +325,135 @@ func (p *Pool) DeleteWebhook(ctx context.Context, id int64) error {
 	}
 	return nil
 }
+
+// --- SIP trunks ---
+
+type SIPTrunk struct {
+	ID            int64
+	Name          string
+	SipHost       string
+	SipPort       int
+	Transport     string
+	AuthUsername  string
+	AuthPassword  string
+	FromUser      string
+	RegisterURI   string
+	ContactUser   string
+	Priority      int
+	Enabled       bool
+}
+
+func (p *Pool) ListSIPTrunks(ctx context.Context) ([]SIPTrunk, error) {
+	rows, err := p.Query(ctx, `
+		SELECT id, name, sip_host, sip_port, transport, auth_username, auth_password,
+			from_user, register_uri, contact_user, priority, enabled
+		FROM sip_trunks ORDER BY priority DESC, id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SIPTrunk
+	for rows.Next() {
+		var t SIPTrunk
+		if err := rows.Scan(&t.ID, &t.Name, &t.SipHost, &t.SipPort, &t.Transport, &t.AuthUsername, &t.AuthPassword,
+			&t.FromUser, &t.RegisterURI, &t.ContactUser, &t.Priority, &t.Enabled); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (p *Pool) ListEnabledTrunks(ctx context.Context) ([]SIPTrunk, error) {
+	rows, err := p.Query(ctx, `
+		SELECT id, name, sip_host, sip_port, transport, auth_username, auth_password,
+			from_user, register_uri, contact_user, priority, enabled
+		FROM sip_trunks WHERE enabled = true
+		ORDER BY priority DESC, id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SIPTrunk
+	for rows.Next() {
+		var t SIPTrunk
+		if err := rows.Scan(&t.ID, &t.Name, &t.SipHost, &t.SipPort, &t.Transport, &t.AuthUsername, &t.AuthPassword,
+			&t.FromUser, &t.RegisterURI, &t.ContactUser, &t.Priority, &t.Enabled); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (p *Pool) InsertSIPTrunk(ctx context.Context, t SIPTrunk) (int64, error) {
+	var id int64
+	err := p.QueryRow(ctx, `
+		INSERT INTO sip_trunks (name, sip_host, sip_port, transport, auth_username, auth_password,
+			from_user, register_uri, contact_user, priority, enabled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id
+	`, t.Name, t.SipHost, t.SipPort, t.Transport, t.AuthUsername, t.AuthPassword, t.FromUser, t.RegisterURI, t.ContactUser, t.Priority, t.Enabled).Scan(&id)
+	return id, err
+}
+
+func (p *Pool) DeleteSIPTrunk(ctx context.Context, id int64) error {
+	ct, err := p.Exec(ctx, `DELETE FROM sip_trunks WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("trunk not found")
+	}
+	return nil
+}
+
+// --- Voicemail ---
+
+func (p *Pool) CountVoicemailMessages(ctx context.Context, mailbox string) (int, error) {
+	var n int
+	err := p.QueryRow(ctx, `SELECT count(*)::int FROM voicemail_messages WHERE mailbox_ext = $1`, mailbox).Scan(&n)
+	return n, err
+}
+
+func (p *Pool) InsertVoicemailMessage(ctx context.Context, mailbox, caller, path string, durationMs int) error {
+	_, err := p.Exec(ctx, `
+		INSERT INTO voicemail_messages (mailbox_ext, caller_ext, file_path, duration_ms)
+		VALUES ($1,$2,$3,$4)
+	`, mailbox, caller, path, durationMs)
+	return err
+}
+
+type VoicemailListItem struct {
+	ID         int64     `json:"id"`
+	CallerExt  string    `json:"caller_ext"`
+	DurationMs int       `json:"duration_ms"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func (p *Pool) ListVoicemailMessages(ctx context.Context, mailbox string) ([]VoicemailListItem, error) {
+	rows, err := p.Query(ctx, `
+		SELECT id, coalesce(caller_ext,''), duration_ms, created_at
+		FROM voicemail_messages WHERE mailbox_ext = $1 ORDER BY created_at DESC LIMIT 200
+	`, mailbox)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VoicemailListItem
+	for rows.Next() {
+		var v VoicemailListItem
+		if err := rows.Scan(&v.ID, &v.CallerExt, &v.DurationMs, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (p *Pool) GetVoicemailPath(ctx context.Context, id int64, mailbox string) (string, error) {
+	var path string
+	err := p.QueryRow(ctx, `SELECT file_path FROM voicemail_messages WHERE id = $1 AND mailbox_ext = $2`, id, mailbox).Scan(&path)
+	return path, err
+}

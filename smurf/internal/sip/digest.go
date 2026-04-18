@@ -127,3 +127,61 @@ func RandomNonce() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// BuildAuthorizationHeader returns a full Authorization: Digest ... value for a UAC.
+func BuildAuthorizationHeader(username, password, method, digestURI, body string, ch AuthParams) string {
+	realm := ch["realm"]
+	nonce := ch["nonce"]
+	qop := strings.ToLower(ch["qop"])
+	if qop == "" {
+		qop = "auth"
+	}
+	algo := strings.ToLower(ch["algorithm"])
+	if algo == "" {
+		algo = "md5"
+	}
+	if strings.HasPrefix(algo, "md5") {
+		algo = "md5"
+	}
+	if strings.Contains(algo, "sha-256") {
+		algo = "sha-256"
+	}
+	ha1 := digestHA1(algo, username, realm, password)
+	ha2 := digestHA2(algo, qop, method, digestURI, body)
+	nc := "00000001"
+	cnonce := RandomNonce()[:16]
+	var response string
+	if qop == "auth" || qop == "auth-int" {
+		if algo == "sha-256" {
+			response = sha256HexLower(fmt.Sprintf("%s:%s:%s:%s:%s:%s", ha1, nonce, nc, cnonce, qop, ha2))
+		} else {
+			response = md5Hex(fmt.Sprintf("%s:%s:%s:%s:%s:%s", ha1, nonce, nc, cnonce, qop, ha2))
+		}
+	} else {
+		if algo == "sha-256" {
+			response = sha256HexLower(fmt.Sprintf("%s:%s:%s", ha1, nonce, ha2))
+		} else {
+			response = md5Hex(fmt.Sprintf("%s:%s:%s", ha1, nonce, ha2))
+		}
+	}
+	opaque := ch["opaque"]
+	algoOut := ch["algorithm"]
+	if algoOut == "" {
+		if algo == "sha-256" {
+			algoOut = "SHA-256"
+		} else {
+			algoOut = "MD5"
+		}
+	}
+	// quote uri per RFC8760
+	escURI := digestURI
+	s := fmt.Sprintf(`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s", algorithm=%s`,
+		username, realm, nonce, escURI, response, algoOut)
+	if qop == "auth" || qop == "auth-int" {
+		s += fmt.Sprintf(`, qop=%s, nc=%s, cnonce="%s"`, qop, nc, cnonce)
+	}
+	if opaque != "" {
+		s += fmt.Sprintf(`, opaque="%s"`, opaque)
+	}
+	return s
+}

@@ -26,6 +26,8 @@ sudo SMURF_LISTEN_IP=127.0.0.1 ./install.sh
 - **Web softphone**: `https://<host>:5001/softphone` — WebRTC audio + SIP signaling over WSS to `SMURF_SIP_WSS` (default `wss://<host>:5081/sip`). Trust the server certificate in the browser.
 - **Call queue**: dial extension **`support`** (sequential hunt to `1000` then `1001` per `sql/seed_queues.sql`). CDR stores `to_ext = support` and `queue_slug`.
 - **Webhooks**: create via API `POST /api/v1/webhooks` with `{"url":"https://...","secret":"...","events":["call.answered","call.ended"]}`. Each POST includes headers `Smurf-Event`, `Smurf-Timestamp`, `Smurf-Signature` (`sha256=` + HMAC-SHA256 of `timestamp + "." + body`).
+- **Voicemail deposit**: dial `*<ext>` (e.g. `*1000`) while authenticated; server answers with SDP, records **PCMU** RTP to **WAV** under `SMURF_VOICEMAIL_DIR` (default `/var/lib/smurf/voicemail`), inserts a row in `voicemail_messages`, sends **MWI NOTIFY** (`message-summary`) to the mailbox if registered. List/download: `GET /api/v1/voicemail/{ext}`, `GET /api/v1/voicemail/{ext}/download/{id}` (JWT).
+- **SIP trunks (outbound)**: configure `sip_trunks` via `POST /api/v1/sip-trunks` (host, auth, `priority` for failover). Calls to **E.164-style** destinations (8+ digits, optional `+`) go out through trunks in priority order: **REGISTER** (digest) runs periodically; **INVITE** uses digest on 401/407, **ACK** on 200, **BYE** to provider when caller hangs up.
 
 Environment overrides live in `/etc/smurf/smurf.env`.
 

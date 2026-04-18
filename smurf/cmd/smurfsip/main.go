@@ -20,6 +20,8 @@ import (
 	"github.com/smurf/pbx/internal/relay"
 	"github.com/smurf/pbx/internal/sdp"
 	"github.com/smurf/pbx/internal/sip"
+	"github.com/smurf/pbx/internal/trunk"
+	"github.com/smurf/pbx/internal/voicemail"
 	"github.com/smurf/pbx/internal/webhook"
 	"github.com/smurf/pbx/internal/wssip"
 )
@@ -71,6 +73,15 @@ type callBridge struct {
 
 	// When destination is a call queue, extension that answered (for BYE routing).
 	queueCalleeExt string
+
+	// Voicemail deposit (RTP → WAV)
+	voicemailRecorder  *voicemail.DepositRecorder
+	voicemailMailbox   string
+	voicemailCallerExt string
+
+	// Outbound trunk PSTN leg
+	outboundTrunk *db.SIPTrunk
+	trunkDialog   *trunk.Dialog
 }
 
 func main() {
@@ -123,6 +134,8 @@ func main() {
 	log.Printf("SIP UDP %s realm=%s public=%s relay=%s", *udpAddr, *realm, *publicIP, *relayCtrl)
 
 	go s.serveUDP(udp)
+
+	s.startTrunkRegistrationLoop()
 
 	if *wssAddr != "" {
 		go func() {
@@ -514,6 +527,14 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 
 	if _, err := s.pool.GetCallQueue(ctx, to); err == nil {
 		return s.handleInviteToQueue(ctx, ws, m, transport, from, to, callID, callerReg)
+	}
+
+	if mb, ok := parseVoicemailDeposit(to); ok {
+		return s.handleInviteVoicemailDeposit(ctx, ws, m, transport, from, mb, callID, callerReg)
+	}
+
+	if isE164ish(to) {
+		return s.handleInviteThroughTrunks(ctx, ws, m, transport, from, to, callID, callerReg)
 	}
 
 	if _, err := s.pool.GetExtension(ctx, to); err != nil {

@@ -28,6 +28,7 @@ from core.db import Database
 from core.logging_utils import configure_json_logging, get_logger
 
 LOGGER = get_logger("pbx-core")
+VALID_PRESENCE_STATUSES = {"available", "busy", "away", "dnd", "offline"}
 
 
 @dataclass(slots=True)
@@ -57,6 +58,13 @@ class PBXCoreService:
         self.queue_least_busy_index: dict[str, int] = defaultdict(int)
         self.park_slots: dict[str, str] = {}  # slot -> call_id
         self.call_meta: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    def _active_call_by_id(self, call_id: str) -> dict[str, Any] | None:
+        return self.db.fetchone(
+            "SELECT call_id, from_ext, to_ext, trunk_name FROM active_calls WHERE call_id = ?",
+            (call_id,),
+        )
 
     async def run(self):
         await self.command_server.start()
@@ -85,16 +93,31 @@ class PBXCoreService:
             counts[str(call["to_ext"])] += 1
         return counts
 
-    def _global_call_limit_ok(self) -> bool:
-        active = self.db.list_active_calls()
+    def _active_calls_snapshot(self) -> list[dict[str, Any]]:
+        return self.db.list_active_calls()
+
+    def _global_call_limit_ok(self, active_calls: list[dict[str, Any]]) -> bool:
+        active = active_calls
         return len(active) < int(self.config.global_.max_global_calls)
 
-    def _extension_call_limit_ok(self, extension: str) -> bool:
+    def _active_trunk_channels(self, trunk_name: str) -> int:
+        count = 0
+        for call in self.db.list_active_calls():
+            if str(call.get("trunk_name", "")) == trunk_name:
+                count += 1
+        return count
+
+    def _extension_call_limit_ok(
+        self,
+        extension: str,
+        active_counts: dict[str, int] | None = None,
+    ) -> bool:
         ext = self.db.get_extension(extension)
         if not ext:
             return False
         max_calls = int(ext.get("max_calls", 1))
-        current = self._active_calls_per_extension().get(extension, 0)
+        counts = active_counts or self._active_calls_per_extension()
+        current = counts.get(extension, 0)
         return current < max_calls
 
     def _choose_ring_group_member(self, group_number: str) -> str | None:
@@ -190,15 +213,27 @@ class PBXCoreService:
     def _route_call(self, call_id: str, from_ext: str, to_ext: str) -> RouteDecision:
         if not call_id:
             return RouteDecision(status="error", reason="missing_call_id")
-        if not self._global_call_limit_ok():
+        existing = self._active_call_by_id(call_id)
+        if existing:
+            return RouteDecision(
+                status="ok",
+                target_extension=str(existing.get("to_ext", "")),
+                route_type="trunk" if existing.get("trunk_name") else "extension",
+                trunk_name=str(existing.get("trunk_name", "")),
+            )
+        active_calls = self._active_calls_snapshot()
+        active_counts = self._active_calls_per_extension()
+        if not self._global_call_limit_ok(active_calls):
             return RouteDecision(status="error", reason="global_call_limit")
-        if not self._extension_call_limit_ok(from_ext):
+        if not self._extension_call_limit_ok(from_ext, active_counts):
             return RouteDecision(status="error", reason="from_extension_limit")
+        if from_ext == to_ext:
+            return RouteDecision(status="error", reason="loop_call_forbidden")
 
         # Internal extension route
         ext = self.db.get_extension(to_ext)
         if ext and int(ext.get("enabled", 1)) == 1:
-            if not self._extension_call_limit_ok(to_ext):
+            if not self._extension_call_limit_ok(to_ext, active_counts):
                 return RouteDecision(status="error", reason="to_extension_limit")
             self.db.start_call(call_id, from_ext, to_ext)
             self.call_meta[call_id] = {
@@ -211,6 +246,8 @@ class PBXCoreService:
         # Ring group direct number
         group_member = self._choose_ring_group_member(to_ext)
         if group_member:
+            if not self._extension_call_limit_ok(group_member, active_counts):
+                return RouteDecision(status="error", reason="group_member_limit")
             self.db.start_call(call_id, from_ext, group_member)
             self.call_meta[call_id] = {
                 "from_ext": from_ext,
@@ -226,6 +263,8 @@ class PBXCoreService:
         # Queue direct number
         queue_member = self._choose_queue_member(to_ext)
         if queue_member:
+            if not self._extension_call_limit_ok(queue_member, active_counts):
+                return RouteDecision(status="error", reason="queue_member_limit")
             self.db.start_call(call_id, from_ext, queue_member)
             self.call_meta[call_id] = {
                 "from_ext": from_ext,
@@ -244,6 +283,21 @@ class PBXCoreService:
             if dialed.status != "ok":
                 return dialed
             if dialed.route_type == "trunk":
+                if dialed.trunk_name:
+                    trunk_cfg = next(
+                        (t for t in self.db.list_trunks() if str(t.get("name", "")) == dialed.trunk_name),
+                        None,
+                    )
+                    if trunk_cfg:
+                        max_channels = int(trunk_cfg.get("max_channels", 0))
+                        if (
+                            max_channels > 0
+                            and self._active_trunk_channels(dialed.trunk_name) >= max_channels
+                        ):
+                            return RouteDecision(
+                                status="error",
+                                reason="trunk_channel_limit",
+                            )
                 self.db.start_call(
                     call_id, from_ext, dialed.target_extension or to_ext, dialed.trunk_name
                 )
@@ -256,6 +310,10 @@ class PBXCoreService:
                 }
                 return dialed
             target = dialed.target_extension or to_ext
+            if dialed.route_type == "extension" and not self._extension_call_limit_ok(
+                target, active_counts
+            ):
+                return RouteDecision(status="error", reason="to_extension_limit")
             self.db.start_call(call_id, from_ext, target)
             self.call_meta[call_id] = {
                 "from_ext": from_ext,
@@ -269,7 +327,18 @@ class PBXCoreService:
         trunks = self.db.list_trunks()
         active_trunks = [t for t in trunks if int(t.get("active", 1)) == 1]
         if active_trunks:
-            trunk = active_trunks[0]
+            trunk = next(
+                (
+                    t
+                    for t in active_trunks
+                    if int(t.get("max_channels", 0)) <= 0
+                    or self._active_trunk_channels(str(t.get("name", "")))
+                    < int(t.get("max_channels", 0))
+                ),
+                None,
+            )
+            if not trunk:
+                return RouteDecision(status="error", reason="all_trunks_busy")
             trunk_name = str(trunk.get("name", ""))
             self.db.start_call(call_id, from_ext, to_ext, trunk_name=trunk_name)
             self.call_meta[call_id] = {
@@ -297,20 +366,23 @@ class PBXCoreService:
             call_id = str(payload.get("call_id", ""))
             from_ext = str(payload.get("from_ext", ""))
             to_ext = str(payload.get("to_ext", ""))
-            decision = self._route_call(call_id, from_ext, to_ext)
-            if decision.status == "ok":
+            if not (call_id and from_ext and to_ext):
+                return {"ok": False, "status": "error", "reason": "missing_route_fields"}
+            async with self._lock:
+                decision = self._route_call(call_id, from_ext, to_ext)
+                if decision.status == "ok":
+                    return {
+                        "ok": True,
+                        "status": "ok",
+                        "target_extension": decision.target_extension,
+                        "route_type": decision.route_type,
+                        "trunk_name": decision.trunk_name,
+                    }
                 return {
-                    "ok": True,
-                    "status": "ok",
-                    "target_extension": decision.target_extension,
-                    "route_type": decision.route_type,
-                    "trunk_name": decision.trunk_name,
+                    "ok": False,
+                    "status": "error",
+                    "reason": decision.reason,
                 }
-            return {
-                "ok": False,
-                "status": "error",
-                "reason": decision.reason,
-            }
 
         if action == "ack_call":
             call_id = str(payload.get("call_id", ""))
@@ -324,14 +396,19 @@ class PBXCoreService:
             if call_id:
                 self.db.end_call(call_id, reason)
                 self.call_meta.pop(call_id, None)
+                for slot, parked_call in list(self.park_slots.items()):
+                    if parked_call == call_id:
+                        self.park_slots.pop(slot, None)
             return {"ok": True}
 
         if action == "set_presence":
             extension = str(payload.get("extension", ""))
-            status = str(payload.get("status", "available"))
-            note = str(payload.get("note", ""))
+            status = str(payload.get("status", "available")).strip().lower()
+            note = str(payload.get("note", ""))[:256]
             if not extension:
                 return {"ok": False, "error": "missing extension"}
+            if status not in VALID_PRESENCE_STATUSES:
+                return {"ok": False, "error": "unknown_presence_status"}
             self.db.set_presence(extension, status, note)
             return {"ok": True}
 
@@ -341,6 +418,8 @@ class PBXCoreService:
             message = str(payload.get("message", ""))
             if not (from_ext and to_ext and message):
                 return {"ok": False, "error": "missing fields"}
+            if len(message) > 4096:
+                return {"ok": False, "error": "chat_message_too_long"}
             self.db.add_chat_message(from_ext, to_ext, message)
             return {"ok": True}
 
@@ -349,6 +428,13 @@ class PBXCoreService:
             slot = str(payload.get("slot", "701"))
             if not call_id:
                 return {"ok": False, "error": "missing call_id"}
+            if not slot.isdigit() or len(slot) > 6:
+                return {"ok": False, "error": "invalid_slot"}
+            if not self.db.fetchone(
+                "SELECT call_id FROM active_calls WHERE call_id = ?",
+                (call_id,),
+            ):
+                return {"ok": False, "error": "call_not_found"}
             self.park_slots[slot] = call_id
             self.db.update_call_state(call_id, "parked")
             return {"ok": True, "slot": slot}
@@ -371,6 +457,8 @@ class PBXCoreService:
         if action == "pickup_call":
             target_extension = str(payload.get("target_extension", ""))
             picker_extension = str(payload.get("picker_extension", ""))
+            if not target_extension or not picker_extension:
+                return {"ok": False, "error": "missing_extensions"}
             active_calls = self.db.list_active_calls()
             ringing_call = next(
                 (

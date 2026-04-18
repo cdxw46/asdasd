@@ -84,6 +84,13 @@
  - `GET /api/cdr`
  - `GET /api/stats`
  - `GET /api/snapshot`
+- `GET/POST /api/ring-groups`
+- `GET/POST /api/queues`
+- `GET/POST /api/ivr`
+- `GET/POST /api/conferences`
+- `POST /api/browser/session`
+- `POST /api/webrtc/offer`
+- `POST /api/webrtc/answer`
 - `GET/POST /api/presence`
 - `GET/POST /api/chat`
 - `GET/POST /api/voicemail`
@@ -123,6 +130,22 @@
  4. Place a SIP INVITE from one extension to the other
  
  SMURF rewrites SDP to anchor audio through its RTP relay pool.
+
+## PBX routing entities
+
+SMURF now includes persisted PBX routing entities:
+
+- Ring groups
+- Queues
+- IVR menus
+- Conference rooms
+
+The current routing baseline is:
+
+- Ring group: routes to the first reachable registered member excluding the caller
+- Queue: routes using the stored strategy order baseline
+- IVR: returns progress and then forwards to the default target
+- Conference room: resolves as an internal routed destination
 
 ## Browser and realtime layer
 

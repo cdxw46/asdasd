@@ -102,6 +102,50 @@ type Recording struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type RingGroup struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Extension string    `json:"extension"`
+	Members   []string  `json:"members"`
+	Strategy  string    `json:"strategy"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Queue struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Extension string    `json:"extension"`
+	Agents    []string  `json:"agents"`
+	Strategy  string    `json:"strategy"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type IVRMenu struct {
+	ID             int64     `json:"id"`
+	Name           string    `json:"name"`
+	Extension      string    `json:"extension"`
+	Greeting       string    `json:"greeting"`
+	TimeoutSeconds int       `json:"timeout_seconds"`
+	DefaultTarget  string    `json:"default_target"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type IVROption struct {
+	ID       int64  `json:"id"`
+	MenuID    int64  `json:"menu_id"`
+	Digit    string `json:"digit"`
+	Target   string `json:"target"`
+	TargetType string `json:"target_type"`
+}
+
+type ConferenceRoom struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Extension string    `json:"extension"`
+	PIN       string    `json:"pin"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 func Open(cfg *config.Config) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o755); err != nil {
 		return nil, err
@@ -219,6 +263,47 @@ func (s *Store) migrate(ctx context.Context, cfg *config.Config) error {
 			duration_sec INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS ring_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			extension TEXT NOT NULL UNIQUE,
+			members TEXT NOT NULL,
+			strategy TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS queues (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			extension TEXT NOT NULL UNIQUE,
+			agents TEXT NOT NULL,
+			strategy TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ivr_menus (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			extension TEXT NOT NULL UNIQUE,
+			greeting TEXT NOT NULL DEFAULT '',
+			timeout_seconds INTEGER NOT NULL DEFAULT 5,
+			default_target TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ivr_options (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			menu_id INTEGER NOT NULL,
+			digit TEXT NOT NULL,
+			target TEXT NOT NULL,
+			target_type TEXT NOT NULL,
+			UNIQUE(menu_id, digit),
+			FOREIGN KEY(menu_id) REFERENCES ivr_menus(id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS conference_rooms (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			extension TEXT NOT NULL UNIQUE,
+			pin TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.SQL.ExecContext(ctx, stmt); err != nil {
@@ -278,6 +363,68 @@ func (s *Store) seed(ctx context.Context, cfg *config.Config) error {
 			`INSERT INTO presence(extension, status, note, updated_at) VALUES(?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
 			ext.Number, "offline", "", now,
 		); err != nil {
+			return err
+		}
+	}
+	if err := s.seedRoutingEntities(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) seedRoutingEntities(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	type insertSeed struct {
+		query string
+		args  []any
+	}
+	seeds := []insertSeed{
+		{
+			query: `INSERT INTO ring_groups(name, extension, members, strategy, created_at)
+			        VALUES(?,?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
+			args:  []any{"Default Ring Group", "7000", "1000,1001", "simultaneous", now},
+		},
+		{
+			query: `INSERT INTO queues(name, extension, agents, strategy, created_at)
+			        VALUES(?,?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
+			args:  []any{"Default Queue", "7100", "1000,1001", "round-robin", now},
+		},
+		{
+			query: `INSERT INTO ivr_menus(name, extension, greeting, timeout_seconds, default_target, created_at)
+			        VALUES(?,?,?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
+			args:  []any{"Main IVR", "7200", "Welcome to SMURF. Press 1 for ring group, 2 for queue, 3 for conference.", 5, "7000", now},
+		},
+		{
+			query: `INSERT INTO conference_rooms(name, extension, pin, created_at)
+			        VALUES(?,?,?,?) ON CONFLICT(extension) DO NOTHING`,
+			args:  []any{"Main Conference", "7300", "1234", now},
+		},
+	}
+	for _, seed := range seeds {
+		if _, err := s.SQL.ExecContext(ctx, seed.query, seed.args...); err != nil {
+			return err
+		}
+	}
+	var menuID int64
+	if err := s.SQL.QueryRowContext(ctx, `SELECT id FROM ivr_menus WHERE extension = ?`, "7200").Scan(&menuID); err != nil {
+		return err
+	}
+	options := []insertSeed{
+		{
+			query: `INSERT INTO ivr_options(menu_id, digit, target, target_type) VALUES(?,?,?,?) ON CONFLICT(menu_id, digit) DO NOTHING`,
+			args:  []any{menuID, "1", "7000", "ring_group"},
+		},
+		{
+			query: `INSERT INTO ivr_options(menu_id, digit, target, target_type) VALUES(?,?,?,?) ON CONFLICT(menu_id, digit) DO NOTHING`,
+			args:  []any{menuID, "2", "7100", "queue"},
+		},
+		{
+			query: `INSERT INTO ivr_options(menu_id, digit, target, target_type) VALUES(?,?,?,?) ON CONFLICT(menu_id, digit) DO NOTHING`,
+			args:  []any{menuID, "3", "7300", "conference"},
+		},
+	}
+	for _, seed := range options {
+		if _, err := s.SQL.ExecContext(ctx, seed.query, seed.args...); err != nil {
 			return err
 		}
 	}
@@ -784,9 +931,289 @@ func (s *Store) ListRecordings(ctx context.Context, limit int) ([]Recording, err
 	return out, rows.Err()
 }
 
+func (s *Store) ListRingGroups(ctx context.Context) ([]RingGroup, error) {
+	rows, err := s.SQL.QueryContext(ctx, `SELECT id, name, extension, members, strategy, created_at FROM ring_groups ORDER BY extension`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RingGroup
+	for rows.Next() {
+		var item RingGroup
+		var members, createdAt string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Extension, &members, &item.Strategy, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Members = splitCSV(members)
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetRingGroupByExtension(ctx context.Context, extension string) (*RingGroup, error) {
+	row := s.SQL.QueryRowContext(ctx, `SELECT id, name, extension, members, strategy, created_at FROM ring_groups WHERE extension = ?`, strings.TrimSpace(extension))
+	var item RingGroup
+	var members, createdAt string
+	if err := row.Scan(&item.ID, &item.Name, &item.Extension, &members, &item.Strategy, &createdAt); err != nil {
+		return nil, err
+	}
+	item.Members = splitCSV(members)
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) GetRingGroupByNumber(ctx context.Context, number string) (*RingGroup, error) {
+	return s.GetRingGroupByExtension(ctx, number)
+}
+
+func (s *Store) CreateRingGroup(ctx context.Context, name, extension string, members []string, strategy string) (*RingGroup, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.SQL.ExecContext(ctx, `INSERT INTO ring_groups(name, extension, members, strategy, created_at) VALUES(?,?,?,?,?)`,
+		strings.TrimSpace(name), strings.TrimSpace(extension), strings.Join(cleanStrings(members), ","), normalizeStrategy(strategy), now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	rows, err := s.SQL.QueryContext(ctx, `SELECT id, name, extension, members, strategy, created_at FROM ring_groups WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var item RingGroup
+		var membersCSV, createdAt string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Extension, &membersCSV, &item.Strategy, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Members = splitCSV(membersCSV)
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		return &item, nil
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (s *Store) ListQueues(ctx context.Context) ([]Queue, error) {
+	rows, err := s.SQL.QueryContext(ctx, `SELECT id, name, extension, agents, strategy, created_at FROM queues ORDER BY extension`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Queue
+	for rows.Next() {
+		var item Queue
+		var agents, createdAt string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Extension, &agents, &item.Strategy, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Agents = splitCSV(agents)
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetQueueByExtension(ctx context.Context, extension string) (*Queue, error) {
+	row := s.SQL.QueryRowContext(ctx, `SELECT id, name, extension, agents, strategy, created_at FROM queues WHERE extension = ?`, strings.TrimSpace(extension))
+	var item Queue
+	var agents, createdAt string
+	if err := row.Scan(&item.ID, &item.Name, &item.Extension, &agents, &item.Strategy, &createdAt); err != nil {
+		return nil, err
+	}
+	item.Agents = splitCSV(agents)
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) GetQueueByNumber(ctx context.Context, number string) (*Queue, error) {
+	return s.GetQueueByExtension(ctx, number)
+}
+
+func (s *Store) CreateQueue(ctx context.Context, name, extension string, agents []string, strategy string) (*Queue, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.SQL.ExecContext(ctx, `INSERT INTO queues(name, extension, agents, strategy, created_at) VALUES(?,?,?,?,?)`,
+		strings.TrimSpace(name), strings.TrimSpace(extension), strings.Join(cleanStrings(agents), ","), normalizeStrategy(strategy), now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	row := s.SQL.QueryRowContext(ctx, `SELECT id, name, extension, agents, strategy, created_at FROM queues WHERE id = ?`, id)
+	var item Queue
+	var agentsCSV, createdAt string
+	if err := row.Scan(&item.ID, &item.Name, &item.Extension, &agentsCSV, &item.Strategy, &createdAt); err != nil {
+		return nil, err
+	}
+	item.Agents = splitCSV(agentsCSV)
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) ListIVRMenus(ctx context.Context) ([]IVRMenu, error) {
+	rows, err := s.SQL.QueryContext(ctx, `SELECT id, name, extension, greeting, timeout_seconds, default_target, created_at FROM ivr_menus ORDER BY extension`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IVRMenu
+	for rows.Next() {
+		var item IVRMenu
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Extension, &item.Greeting, &item.TimeoutSeconds, &item.DefaultTarget, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetIVRMenuByExtension(ctx context.Context, extension string) (*IVRMenu, error) {
+	row := s.SQL.QueryRowContext(ctx, `SELECT id, name, extension, greeting, timeout_seconds, default_target, created_at FROM ivr_menus WHERE extension = ?`, strings.TrimSpace(extension))
+	var item IVRMenu
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.Name, &item.Extension, &item.Greeting, &item.TimeoutSeconds, &item.DefaultTarget, &createdAt); err != nil {
+		return nil, err
+	}
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) GetIVRByNumber(ctx context.Context, number string) (*IVRMenu, error) {
+	return s.GetIVRMenuByExtension(ctx, number)
+}
+
+func (s *Store) ListIVROptions(ctx context.Context, menuID int64) ([]IVROption, error) {
+	rows, err := s.SQL.QueryContext(ctx, `SELECT id, menu_id, digit, target, target_type FROM ivr_options WHERE menu_id = ? ORDER BY digit`, menuID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IVROption
+	for rows.Next() {
+		var item IVROption
+		if err := rows.Scan(&item.ID, &item.MenuID, &item.Digit, &item.Target, &item.TargetType); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateIVRMenu(ctx context.Context, item IVRMenu, options []IVROption) (*IVRMenu, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := s.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO ivr_menus(name, extension, greeting, timeout_seconds, default_target, created_at) VALUES(?,?,?,?,?,?)`,
+		strings.TrimSpace(item.Name), strings.TrimSpace(item.Extension), strings.TrimSpace(item.Greeting), item.TimeoutSeconds, strings.TrimSpace(item.DefaultTarget), now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	menuID, _ := res.LastInsertId()
+	for _, option := range options {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ivr_options(menu_id, digit, target, target_type) VALUES(?,?,?,?)`,
+			menuID, strings.TrimSpace(option.Digit), strings.TrimSpace(option.Target), strings.TrimSpace(option.TargetType),
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.GetIVRMenuByExtension(ctx, item.Extension)
+}
+
+func (s *Store) ListConferenceRooms(ctx context.Context) ([]ConferenceRoom, error) {
+	rows, err := s.SQL.QueryContext(ctx, `SELECT id, name, extension, pin, created_at FROM conference_rooms ORDER BY extension`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ConferenceRoom
+	for rows.Next() {
+		var item ConferenceRoom
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Extension, &item.PIN, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetConferenceRoomByExtension(ctx context.Context, extension string) (*ConferenceRoom, error) {
+	row := s.SQL.QueryRowContext(ctx, `SELECT id, name, extension, pin, created_at FROM conference_rooms WHERE extension = ?`, strings.TrimSpace(extension))
+	var item ConferenceRoom
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.Name, &item.Extension, &item.PIN, &createdAt); err != nil {
+		return nil, err
+	}
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
+func (s *Store) GetConferenceRoomByNumber(ctx context.Context, number string) (*ConferenceRoom, error) {
+	return s.GetConferenceRoomByExtension(ctx, number)
+}
+
+func (s *Store) CreateConferenceRoom(ctx context.Context, name, extension, pin string) (*ConferenceRoom, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.SQL.ExecContext(ctx, `INSERT INTO conference_rooms(name, extension, pin, created_at) VALUES(?,?,?,?)`,
+		strings.TrimSpace(name), strings.TrimSpace(extension), strings.TrimSpace(pin), now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	row := s.SQL.QueryRowContext(ctx, `SELECT id, name, extension, pin, created_at FROM conference_rooms WHERE id = ?`, id)
+	var item ConferenceRoom
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.Name, &item.Extension, &item.PIN, &createdAt); err != nil {
+		return nil, err
+	}
+	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &item, nil
+}
+
 func boolToInt(v bool) int {
 	if v {
 		return 1
 	}
 	return 0
+}
+
+func splitCSV(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return []string{}
+	}
+	parts := strings.Split(value, ",")
+	return cleanStrings(parts)
+}
+
+func cleanStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func normalizeStrategy(strategy string) string {
+	strategy = strings.ToLower(strings.TrimSpace(strategy))
+	switch strategy {
+	case "round-robin", "random", "least-busy", "priority", "simultaneous":
+		return strategy
+	default:
+		return "simultaneous"
+	}
 }

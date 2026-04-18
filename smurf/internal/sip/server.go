@@ -359,13 +359,51 @@ func (s *Server) handleInvite(ctx context.Context, msg *Message, reqCtx *Request
 	}
 	_ = s.store.ResetFailedAuth(ctx, util.RemoteIP(reqCtx.Remote), from)
 
-	regs, err := s.store.GetRegistrations(ctx, to)
+	route, err := s.pbx.ResolveRoute(ctx, from, to)
+	if err != nil {
+		s.reply(reqCtx, BuildResponse(msg, 404, "Not Found", nil, ""))
+		return
+	}
+	resolvedTarget := to
+	switch route.Kind {
+	case pbx.RouteExtension:
+		resolvedTarget = route.Target
+	case pbx.RouteRingGroup, pbx.RouteQueue:
+		member, regs, err := s.firstReachableTarget(ctx, route.Targets)
+		if err != nil {
+			s.reply(reqCtx, BuildResponse(msg, 480, "Temporarily Unavailable", nil, ""))
+			return
+		}
+		s.reply(reqCtx, BuildResponse(msg, 182, "Queued", map[string]string{
+			"Reason": fmt.Sprintf("SMURF route=%s target=%s member=%s", route.Kind, route.Target, member),
+		}, ""))
+		resolvedTarget = member
+		_ = regs
+	case pbx.RouteIVR:
+		selected := route.Metadata["default"]
+		if selected == "" && len(route.Targets) > 0 {
+			selected = route.Targets[0]
+		}
+		if strings.TrimSpace(selected) == "" {
+			s.reply(reqCtx, BuildResponse(msg, 480, "Temporarily Unavailable", nil, ""))
+			return
+		}
+		s.reply(reqCtx, BuildResponse(msg, 183, "Session Progress", map[string]string{
+			"Reason":       fmt.Sprintf("SMURF IVR %s", route.Target),
+			"X-SMURF-IVR":  route.Target,
+			"X-SMURF-PROMPT": route.Announcement,
+		}, ""))
+		resolvedTarget = selected
+	case pbx.RouteConference:
+		resolvedTarget = route.Target
+	}
+	regs, err := s.store.GetRegistrations(ctx, resolvedTarget)
 	if err != nil || len(regs) == 0 {
 		s.reply(reqCtx, BuildResponse(msg, 480, "Temporarily Unavailable", nil, ""))
 		return
 	}
 
-	session, err := s.pbx.StartInternalCall(ctx, from, to, headerCallID(msg))
+	session, err := s.pbx.StartInternalCall(ctx, from, resolvedTarget, headerCallID(msg))
 	if err != nil {
 		s.reply(reqCtx, BuildResponse(msg, 500, "Server Error", nil, ""))
 		return
@@ -383,7 +421,7 @@ func (s *Server) handleInvite(ctx context.Context, msg *Message, reqCtx *Request
 	s.invites[headerCallID(msg)] = &inviteDialog{
 		CallID:    headerCallID(msg),
 		Caller:    from,
-		Callee:    to,
+		Callee:    resolvedTarget,
 		CallerCtx: reqCtx,
 		InviteReq: msg.Clone(),
 	}
@@ -564,6 +602,20 @@ func (s *Server) sendToRegistration(transport, target string, msg *Message) erro
 		_, err = conn.Write([]byte(msg.String()))
 		return err
 	}
+}
+
+func (s *Server) firstReachableTarget(ctx context.Context, targets []string) (string, []db.Registration, error) {
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		regs, err := s.store.GetRegistrations(ctx, target)
+		if err == nil && len(regs) > 0 {
+			return target, regs, nil
+		}
+	}
+	return "", nil, fmt.Errorf("no reachable targets")
 }
 
 func normalizeSIPTarget(target string) string {

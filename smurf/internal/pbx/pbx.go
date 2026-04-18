@@ -3,6 +3,8 @@ package pbx
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,32 @@ import (
 
 type Store interface {
 	CreateOrUpdateCDR(ctx context.Context, cdr db.CDR) error
+	GetExtensionByNumber(ctx context.Context, number string) (*db.Extension, error)
+	GetRingGroupByNumber(ctx context.Context, number string) (*db.RingGroup, error)
+	GetQueueByNumber(ctx context.Context, number string) (*db.Queue, error)
+	GetIVRByNumber(ctx context.Context, number string) (*db.IVRMenu, error)
+	GetConferenceRoomByNumber(ctx context.Context, number string) (*db.ConferenceRoom, error)
+}
+
+type RouteKind string
+
+const (
+	RouteExtension  RouteKind = "extension"
+	RouteRingGroup  RouteKind = "ring_group"
+	RouteQueue      RouteKind = "queue"
+	RouteIVR        RouteKind = "ivr"
+	RouteConference RouteKind = "conference"
+)
+
+type RouteDecision struct {
+	Kind         RouteKind         `json:"kind"`
+	Target       string            `json:"target"`
+	DisplayName  string            `json:"display_name,omitempty"`
+	Members      []string          `json:"members,omitempty"`
+	Targets      []string          `json:"targets,omitempty"`
+	Strategy     string            `json:"strategy,omitempty"`
+	Announcement string            `json:"announcement,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 type CallSession struct {
@@ -172,5 +200,92 @@ func (e *Engine) Stats() map[string]any {
 	return map[string]any{
 		"active_calls": len(e.calls),
 	}
+}
+
+func (e *Engine) ResolveRoute(ctx context.Context, fromExt, dialed string) (*RouteDecision, error) {
+	dialed = strings.TrimSpace(dialed)
+	if dialed == "" {
+		return nil, fmt.Errorf("empty dialed target")
+	}
+	if ext, err := e.store.GetExtensionByNumber(ctx, dialed); err == nil && ext != nil {
+		return &RouteDecision{
+			Kind:        RouteExtension,
+			Target:      ext.Number,
+			DisplayName: ext.DisplayName,
+		}, nil
+	}
+	if rg, err := e.store.GetRingGroupByNumber(ctx, dialed); err == nil && rg != nil {
+		members := filterOutTarget(append([]string(nil), rg.Members...), fromExt)
+		return &RouteDecision{
+			Kind:        RouteRingGroup,
+			Target:      rg.Extension,
+			DisplayName: rg.Name,
+			Targets:     members,
+		}, nil
+	}
+	if q, err := e.store.GetQueueByNumber(ctx, dialed); err == nil && q != nil {
+		members := filterOutTarget(append([]string(nil), q.Agents...), fromExt)
+		return &RouteDecision{
+			Kind:        RouteQueue,
+			Target:      q.Extension,
+			DisplayName: q.Name,
+			Targets:     orderQueueTargets(members, q.Strategy),
+			Strategy:    q.Strategy,
+		}, nil
+	}
+	if ivr, err := e.store.GetIVRByNumber(ctx, dialed); err == nil && ivr != nil {
+		targets := []string{}
+		metadata := map[string]string{}
+		if ivr.DefaultTarget != "" {
+			targets = append(targets, ivr.DefaultTarget)
+			metadata["default"] = ivr.DefaultTarget
+		}
+		return &RouteDecision{
+			Kind:         RouteIVR,
+			Target:       ivr.Extension,
+			DisplayName:  ivr.Name,
+			Targets:      targets,
+			Announcement: ivr.Greeting,
+			Metadata:     metadata,
+		}, nil
+	}
+	if conf, err := e.store.GetConferenceRoomByNumber(ctx, dialed); err == nil && conf != nil {
+		return &RouteDecision{
+			Kind:        RouteConference,
+			Target:      conf.Extension,
+			DisplayName: conf.Name,
+		}, nil
+	}
+	return nil, fmt.Errorf("no route found for %s", dialed)
+}
+
+func orderQueueTargets(targets []string, strategy string) []string {
+	if len(targets) <= 1 {
+		return targets
+	}
+	out := append([]string(nil), targets...)
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "random":
+		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	case "round-robin":
+		// Keep stored order for now; this is the stable baseline.
+	default:
+		// Fallback keeps stored order for least-busy/priority until richer stats exist.
+	}
+	return out
+}
+
+func filterOutTarget(targets []string, exclude string) []string {
+	exclude = strings.TrimSpace(exclude)
+	if exclude == "" {
+		return append([]string(nil), targets...)
+	}
+	out := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if strings.TrimSpace(target) != exclude {
+			out = append(out, target)
+		}
+	}
+	return out
 }
 

@@ -62,6 +62,10 @@ func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, webrtcGatew
 	mux.Handle("/api/chat", s.authRequired(http.HandlerFunc(s.handleChat)))
 	mux.Handle("/api/voicemail", s.authRequired(http.HandlerFunc(s.handleVoicemail)))
 	mux.Handle("/api/recordings", s.authRequired(http.HandlerFunc(s.handleRecordings)))
+	mux.Handle("/api/ring-groups", s.authRequired(http.HandlerFunc(s.handleRingGroups)))
+	mux.Handle("/api/queues", s.authRequired(http.HandlerFunc(s.handleQueues)))
+	mux.Handle("/api/ivr", s.authRequired(http.HandlerFunc(s.handleIVRMenus)))
+	mux.Handle("/api/conferences", s.authRequired(http.HandlerFunc(s.handleConferenceRooms)))
 	mux.Handle("/api/webrtc/offer", s.authRequired(http.HandlerFunc(s.handleWebRTCOffer)))
 	mux.Handle("/api/webrtc/answer", s.authRequired(http.HandlerFunc(s.handleWebRTCAnswer)))
 	mux.Handle("/ws", s.ws)
@@ -417,6 +421,149 @@ func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.hub.Publish("recordings", "recording.new", item)
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleRingGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.store.ListRingGroups(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			Name      string   `json:"name"`
+			Extension string   `json:"extension"`
+			Members   []string `json:"members"`
+			Strategy  string   `json:"strategy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		item, err := s.store.CreateRingGroup(r.Context(), body.Name, body.Extension, body.Members, body.Strategy)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleQueues(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.store.ListQueues(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			Name      string   `json:"name"`
+			Extension string   `json:"extension"`
+			Agents    []string `json:"agents"`
+			Strategy  string   `json:"strategy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		item, err := s.store.CreateQueue(r.Context(), body.Name, body.Extension, body.Agents, body.Strategy)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleIVRMenus(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.store.ListIVRMenus(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			Name           string `json:"name"`
+			Extension      string `json:"extension"`
+			Greeting       string `json:"greeting"`
+			TimeoutSeconds int    `json:"timeout_seconds"`
+			DefaultTarget  string `json:"default_target"`
+			Options        []struct {
+				Digit      string `json:"digit"`
+				Target     string `json:"target"`
+				TargetType string `json:"target_type"`
+			} `json:"options"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		options := make([]db.IVROption, 0, len(body.Options))
+		for _, option := range body.Options {
+			options = append(options, db.IVROption{
+				Digit:      option.Digit,
+				Target:     option.Target,
+				TargetType: option.TargetType,
+			})
+		}
+		item, err := s.store.CreateIVRMenu(r.Context(), db.IVRMenu{
+			Name:           body.Name,
+			Extension:      body.Extension,
+			Greeting:       body.Greeting,
+			TimeoutSeconds: body.TimeoutSeconds,
+			DefaultTarget:  body.DefaultTarget,
+		}, options)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, item)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleConferenceRooms(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.store.ListConferenceRooms(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, rows)
+	case http.MethodPost:
+		var body struct {
+			Name      string `json:"name"`
+			Extension string `json:"extension"`
+			PIN       string `json:"pin"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		item, err := s.store.CreateConferenceRoom(r.Context(), body.Name, body.Extension, body.PIN)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusCreated, item)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

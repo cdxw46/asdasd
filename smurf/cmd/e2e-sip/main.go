@@ -203,11 +203,22 @@ func (u *UA) invite(target string) (*sip.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = u.recvUntil(3*time.Second, func(msg *sip.Message) bool { return !msg.IsRequest && msg.StatusCode == 180 })
-	if err != nil {
-		return nil, err
+	for {
+		msg, err := u.recvUntil(5*time.Second, func(msg *sip.Message) bool { return !msg.IsRequest })
+		if err != nil {
+			return nil, err
+		}
+		switch msg.StatusCode {
+		case 180, 182, 183:
+			continue
+		case 200:
+			return msg, nil
+		default:
+			if msg.StatusCode >= 300 {
+				return nil, fmt.Errorf("unexpected final response %d", msg.StatusCode)
+			}
+		}
 	}
-	return u.recvUntil(5*time.Second, func(msg *sip.Message) bool { return !msg.IsRequest && msg.StatusCode == 200 })
 }
 
 func (u *UA) waitIncomingInvite() (*sip.Message, error) {
@@ -429,6 +440,7 @@ func main() {
 	server := flag.String("server", "127.0.0.1:15060", "SMURF SIP UDP address")
 	domain := flag.String("domain", "127.0.0.1", "SIP domain / realm")
 	apiBase := flag.String("api", "https://127.0.0.1:15001", "SMURF HTTPS admin API base")
+	target := flag.String("target", "1001", "Dial target extension or PBX route")
 	flag.Parse()
 
 	if err := ensureExtension(*apiBase, "admin", "admin123!", "1001", "E2E 1001", "abc123"); err != nil {
@@ -479,8 +491,8 @@ func main() {
 		inviteCh <- inv
 	}()
 
-	fmt.Println("E2E: place INVITE A -> B")
-	resp200, err := uaA.invite("1001")
+	fmt.Printf("E2E: place INVITE A -> %s\n", *target)
+	resp200, err := uaA.invite(*target)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invite failed:", err)
 		os.Exit(4)
@@ -493,7 +505,7 @@ func main() {
 	case invFromA = <-inviteCh:
 	}
 
-	if err := uaA.sendAck(resp200, "1001"); err != nil {
+	if err := uaA.sendAck(resp200, *target); err != nil {
 		fmt.Fprintln(os.Stderr, "ack failed:", err)
 		os.Exit(6)
 	}
@@ -523,7 +535,7 @@ func main() {
 	}()
 
 	fmt.Println("E2E: send BYE")
-	if err := uaA.sendBye("1001", resp200.GetHeader("To")); err != nil {
+	if err := uaA.sendBye(*target, resp200.GetHeader("To")); err != nil {
 		fmt.Fprintln(os.Stderr, "bye send failed:", err)
 		os.Exit(11)
 	}

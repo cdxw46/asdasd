@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS extensions (
     secret          TEXT NOT NULL,
     display_name    TEXT NOT NULL DEFAULT '',
     max_concurrent  INT NOT NULL DEFAULT 4 CHECK (max_concurrent > 0),
+    record_calls    BOOLEAN NOT NULL DEFAULT false,
+    ivr_menu_slug   VARCHAR(64),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -11,12 +11,10 @@ import (
 	"time"
 )
 
-// SMURF RTP relay: two UDP ports per call leg; forwards RTP symmetrically
-// between the first remote endpoints seen on each leg.
-
 type ctlOpen struct {
-	Cmd string `json:"cmd"`
-	ID  string `json:"id"`
+	Cmd     string `json:"cmd"`
+	ID      string `json:"id"`
+	TapAddr string `json:"tap_addr,omitempty"`
 }
 
 type ctlOpenResp struct {
@@ -31,15 +29,15 @@ type ctlClose struct {
 }
 
 type session struct {
-	id    string
-	rtpA  *net.UDPConn
-	rtpB  *net.UDPConn
-	stop  chan struct{}
-	wg    sync.WaitGroup
-
-	mu    sync.Mutex
-	addrA *net.UDPAddr
-	addrB *net.UDPAddr
+	id      string
+	rtpA    *net.UDPConn
+	rtpB    *net.UDPConn
+	tapConn *net.UDPConn
+	stop    chan struct{}
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	addrA   *net.UDPAddr
+	addrB   *net.UDPAddr
 }
 
 var (
@@ -78,13 +76,14 @@ func handleControl(c net.Conn, bindIP string) {
 		}
 		cmd, _ := raw["cmd"].(string)
 		id, _ := raw["id"].(string)
+		tap, _ := raw["tap_addr"].(string)
 		switch cmd {
 		case "open":
 			if id == "" {
 				_ = enc.Encode(ctlOpenResp{Error: "missing id"})
 				continue
 			}
-			a, b, err := openSession(id, bindIP)
+			a, b, err := openSession(id, bindIP, tap)
 			if err != nil {
 				_ = enc.Encode(ctlOpenResp{Error: err.Error()})
 				continue
@@ -99,13 +98,26 @@ func handleControl(c net.Conn, bindIP string) {
 	}
 }
 
-func openSession(id, bindIP string) (int, int, error) {
+func openSession(id, bindIP, tapAddr string) (int, int, error) {
 	sessionsMu.Lock()
 	if _, ok := sessions[id]; ok {
 		sessionsMu.Unlock()
 		return 0, 0, fmt.Errorf("session exists")
 	}
 	s := &session{id: id, stop: make(chan struct{})}
+	if tapAddr != "" {
+		a, err := net.ResolveUDPAddr("udp", tapAddr)
+		if err != nil {
+			sessionsMu.Unlock()
+			return 0, 0, err
+		}
+		tc, err := net.DialUDP("udp", nil, a)
+		if err != nil {
+			sessionsMu.Unlock()
+			return 0, 0, err
+		}
+		s.tapConn = tc
+	}
 	sessions[id] = s
 	sessionsMu.Unlock()
 
@@ -123,8 +135,8 @@ func openSession(id, bindIP string) (int, int, error) {
 	s.rtpA, s.rtpB = rtpA, rtpB
 
 	s.wg.Add(2)
-	go s.forwardLoop(rtpA, rtpB, &s.addrA, &s.addrB)
-	go s.forwardLoop(rtpB, rtpA, &s.addrB, &s.addrA)
+	go s.forwardLoop(rtpA, rtpB, &s.addrA, &s.addrB, true)
+	go s.forwardLoop(rtpB, rtpA, &s.addrB, &s.addrA, false)
 
 	return portA, portB, nil
 }
@@ -141,7 +153,7 @@ func listenUDP(bindIP string) (*net.UDPConn, int, error) {
 	return c, c.LocalAddr().(*net.UDPAddr).Port, nil
 }
 
-func (s *session) forwardLoop(in, out *net.UDPConn, srcAddr, peerAddr **net.UDPAddr) {
+func (s *session) forwardLoop(in, out *net.UDPConn, srcAddr, peerAddr **net.UDPAddr, isLegA bool) {
 	defer s.wg.Done()
 	buf := make([]byte, 2048)
 	for {
@@ -163,7 +175,11 @@ func (s *session) forwardLoop(in, out *net.UDPConn, srcAddr, peerAddr **net.UDPA
 			*srcAddr = raddr
 		}
 		dst := *peerAddr
+		tap := s.tapConn
 		s.mu.Unlock()
+		if isLegA && tap != nil {
+			_, _ = tap.Write(buf[:n])
+		}
 		if dst == nil {
 			continue
 		}
@@ -187,6 +203,9 @@ func closeSession(id string) {
 	}
 	if s.rtpB != nil {
 		_ = s.rtpB.Close()
+	}
+	if s.tapConn != nil {
+		_ = s.tapConn.Close()
 	}
 	s.wg.Wait()
 }

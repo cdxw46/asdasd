@@ -12,8 +12,8 @@ import (
 	"github.com/smurf/pbx/internal/db"
 	"github.com/smurf/pbx/internal/sdp"
 	"github.com/smurf/pbx/internal/sip"
-	"github.com/smurf/pbx/internal/webrtcmedia"
 	"github.com/smurf/pbx/internal/webhook"
+	"github.com/smurf/pbx/internal/webrtcmedia"
 	"github.com/smurf/pbx/internal/wssip"
 )
 
@@ -65,15 +65,15 @@ func (s *Server) handleInviteToQueue(ctx context.Context, ws *wssip.Session, m *
 	}
 
 	br := &callBridge{
-		LegACallID:      callID,
-		LegBCallID:      callID + "-b",
-		CallerWS:        ws,
-		fromExt:         from,
-		toExt:           queueSlug,
-		cdrID:           cdrID,
-		relayPorts:      [2]int{rtpA, rtpB},
-		callerReg:       callerReg,
-		webrtcCleanup:   webrtcCleanup,
+		LegACallID:    callID,
+		LegBCallID:    callID + "-b",
+		CallerWS:      ws,
+		fromExt:       from,
+		toExt:         queueSlug,
+		cdrID:         cdrID,
+		relayPorts:    [2]int{rtpA, rtpB},
+		callerReg:     callerReg,
+		webrtcCleanup: webrtcCleanup,
 	}
 	s.callMu.Lock()
 	s.calls[callID] = br

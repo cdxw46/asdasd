@@ -27,6 +27,20 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 
 install -d -m 0755 /opt/smurf /etc/smurf
+install -d -m 0755 /var/lib/smurf/moh /var/lib/smurf/recordings /var/lib/smurf/voicemail
+if [[ ! -f /var/lib/smurf/moh/default.wav ]]; then
+  python3 - <<'PY'
+import struct, wave, math
+path = "/var/lib/smurf/moh/default.wav"
+with wave.open(path, "w") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(8000)
+    for i in range(8000 * 3):
+        v = int(8000 * math.sin(2 * math.pi * 440 * i / 8000))
+        w.writeframes(struct.pack("<h", max(-32767, min(32767, v))))
+PY
+fi
 
 openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
   -subj "/CN=smurf.local" \
@@ -49,6 +63,9 @@ SQL
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_queues_webhooks.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_voicemail_trunks.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/schema_ivr_moh_record.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed_ivr_moh.sql"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/migrate_extensions_ivr.sql" || true
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/seed_queues.sql"
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d smurf -f "${ROOT}/sql/migrate_transport_ws.sql" || true

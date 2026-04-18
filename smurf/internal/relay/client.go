@@ -18,14 +18,15 @@ func New(addr string) *Client {
 }
 
 type openReq struct {
-	Cmd string `json:"cmd"`
-	ID  string `json:"id"`
+	Cmd     string `json:"cmd"`
+	ID      string `json:"id"`
+	TapAddr string `json:"tap_addr,omitempty"` // "host:port" receive copies of packets from RTP leg A (caller)
 }
 
 type openResp struct {
-	RTPA int    `json:"rtp_a"`
-	RTPB int    `json:"rtp_b"`
-	Err  string `json:"error,omitempty"`
+	RTPA  int    `json:"rtp_a"`
+	RTPB  int    `json:"rtp_b"`
+	Error string `json:"error,omitempty"`
 }
 
 type closeReq struct {
@@ -33,8 +34,11 @@ type closeReq struct {
 	ID  string `json:"id"`
 }
 
-// OpenSession allocates a symmetric RTP bridge. Returns UDP ports for leg A and leg B.
 func (c *Client) OpenSession(id string) (legA int, legB int, err error) {
+	return c.OpenSessionWithTap(id, "")
+}
+
+func (c *Client) OpenSessionWithTap(id, tapAddr string) (legA int, legB int, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conn, err := net.Dial("tcp", c.addr)
@@ -44,15 +48,15 @@ func (c *Client) OpenSession(id string) (legA int, legB int, err error) {
 	defer conn.Close()
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(bufio.NewReader(conn))
-	if err := enc.Encode(openReq{Cmd: "open", ID: id}); err != nil {
+	if err := enc.Encode(openReq{Cmd: "open", ID: id, TapAddr: tapAddr}); err != nil {
 		return 0, 0, err
 	}
 	var resp openResp
 	if err := dec.Decode(&resp); err != nil {
 		return 0, 0, err
 	}
-	if resp.Err != "" {
-		return 0, 0, fmt.Errorf("%s", resp.Err)
+	if resp.Error != "" {
+		return 0, 0, fmt.Errorf("%s", resp.Error)
 	}
 	if resp.RTPA == 0 || resp.RTPB == 0 {
 		return 0, 0, fmt.Errorf("invalid relay response")

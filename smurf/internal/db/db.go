@@ -37,16 +37,23 @@ type Extension struct {
 	Secret        string
 	DisplayName   string
 	MaxConcurrent int
+	RecordCalls   bool
+	IVRMenuSlug   string
 }
 
 func (p *Pool) GetExtension(ctx context.Context, number string) (*Extension, error) {
 	var e Extension
+	var ivr sql.NullString
 	err := p.QueryRow(ctx, `
-		SELECT number, secret, display_name, max_concurrent
+		SELECT number, secret, display_name, max_concurrent,
+			COALESCE(record_calls, false), ivr_menu_slug
 		FROM extensions WHERE number = $1
-	`, number).Scan(&e.Number, &e.Secret, &e.DisplayName, &e.MaxConcurrent)
+	`, number).Scan(&e.Number, &e.Secret, &e.DisplayName, &e.MaxConcurrent, &e.RecordCalls, &ivr)
 	if err != nil {
 		return nil, err
+	}
+	if ivr.Valid {
+		e.IVRMenuSlug = ivr.String
 	}
 	return &e, nil
 }
@@ -99,7 +106,10 @@ func (p *Pool) GetRegistration(ctx context.Context, extension string) (*Registra
 }
 
 func (p *Pool) ListExtensions(ctx context.Context) ([]Extension, error) {
-	rows, err := p.Query(ctx, `SELECT number, secret, display_name, max_concurrent FROM extensions ORDER BY number`)
+	rows, err := p.Query(ctx, `
+		SELECT number, secret, display_name, max_concurrent,
+			COALESCE(record_calls, false), ivr_menu_slug
+		FROM extensions ORDER BY number`)
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +117,12 @@ func (p *Pool) ListExtensions(ctx context.Context) ([]Extension, error) {
 	var out []Extension
 	for rows.Next() {
 		var e Extension
-		if err := rows.Scan(&e.Number, &e.Secret, &e.DisplayName, &e.MaxConcurrent); err != nil {
+		var ivr sql.NullString
+		if err := rows.Scan(&e.Number, &e.Secret, &e.DisplayName, &e.MaxConcurrent, &e.RecordCalls, &ivr); err != nil {
 			return nil, err
+		}
+		if ivr.Valid {
+			e.IVRMenuSlug = ivr.String
 		}
 		out = append(out, e)
 	}
@@ -238,10 +252,10 @@ func (p *Pool) GetCDR(ctx context.Context, id int64) (*CDRRow, error) {
 // --- Call queues ---
 
 type CallQueue struct {
-	Slug            string
-	Name            string
-	Strategy        string
-	RingTimeoutSec  int
+	Slug           string
+	Name           string
+	Strategy       string
+	RingTimeoutSec int
 }
 
 func (p *Pool) GetCallQueue(ctx context.Context, slug string) (*CallQueue, error) {
@@ -329,18 +343,18 @@ func (p *Pool) DeleteWebhook(ctx context.Context, id int64) error {
 // --- SIP trunks ---
 
 type SIPTrunk struct {
-	ID            int64
-	Name          string
-	SipHost       string
-	SipPort       int
-	Transport     string
-	AuthUsername  string
-	AuthPassword  string
-	FromUser      string
-	RegisterURI   string
-	ContactUser   string
-	Priority      int
-	Enabled       bool
+	ID           int64
+	Name         string
+	SipHost      string
+	SipPort      int
+	Transport    string
+	AuthUsername string
+	AuthPassword string
+	FromUser     string
+	RegisterURI  string
+	ContactUser  string
+	Priority     int
+	Enabled      bool
 }
 
 func (p *Pool) ListSIPTrunks(ctx context.Context) ([]SIPTrunk, error) {
@@ -456,4 +470,51 @@ func (p *Pool) GetVoicemailPath(ctx context.Context, id int64, mailbox string) (
 	var path string
 	err := p.QueryRow(ctx, `SELECT file_path FROM voicemail_messages WHERE id = $1 AND mailbox_ext = $2`, id, mailbox).Scan(&path)
 	return path, err
+}
+
+// --- Office hours ---
+
+type OfficeHours struct {
+	Extension     string
+	WeekdayMask   int
+	TimeStart     string // "HH:MM:SS" or "HH:MM"
+	TimeEnd       string
+	OutsideTarget string
+	Timezone      string
+}
+
+func (p *Pool) GetOfficeHours(ctx context.Context, extension string) (*OfficeHours, error) {
+	var o OfficeHours
+	err := p.QueryRow(ctx, `
+		SELECT extension_number, weekday_mask, time_start::text, time_end::text, outside_target, timezone
+		FROM office_hours WHERE extension_number = $1
+	`, extension).Scan(&o.Extension, &o.WeekdayMask, &o.TimeStart, &o.TimeEnd, &o.OutsideTarget, &o.Timezone)
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// --- IVR ---
+
+type IVRMenu struct {
+	Slug        string
+	Name        string
+	WelcomeFile string
+	TimeoutSec  int
+}
+
+func (p *Pool) GetIVRMenu(ctx context.Context, slug string) (*IVRMenu, error) {
+	var m IVRMenu
+	err := p.QueryRow(ctx, `SELECT slug, name, welcome_file, timeout_sec FROM ivr_menus WHERE slug = $1`, slug).
+		Scan(&m.Slug, &m.Name, &m.WelcomeFile, &m.TimeoutSec)
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (p *Pool) GetIVROption(ctx context.Context, menuSlug, digit string) (action string, err error) {
+	err = p.QueryRow(ctx, `SELECT action FROM ivr_options WHERE menu_slug = $1 AND digit = $2`, menuSlug, digit).Scan(&action)
+	return action, err
 }

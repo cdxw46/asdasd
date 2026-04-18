@@ -72,6 +72,13 @@ func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, _ string, 
 		return sipResponse(m, 481, "Call/Transaction Does Not Exist")
 	}
 	cid := m.Headers.Get("call-id")
+	if (m.Method == "BYE" || m.Method == "CANCEL") && br.ivrMenuSlug != "" && br.ivrWelcomeStop != nil {
+		select {
+		case <-br.ivrWelcomeStop:
+		default:
+			close(br.ivrWelcomeStop)
+		}
+	}
 	if (m.Method == "BYE" || m.Method == "CANCEL") && br.voicemailRecorder != nil {
 		s.finalizeVoicemailDeposit(br)
 		s.tearDownCall(br, br.LegACallID)
@@ -81,6 +88,12 @@ func (s *Server) handleMidDialog(ctx context.Context, m *sip.Message, _ string, 
 	}
 	if (m.Method == "BYE" || m.Method == "CANCEL") && cid == br.LegACallID && br.outboundTrunk != nil && br.trunkDialog != nil {
 		_ = trunk.SendBYE(br.outboundTrunk, br.trunkDialog, s.publicIP, s.sipPort)
+		s.tearDownCall(br, br.LegACallID)
+		_ = s.pool.UpdateCDREnded(ctx, br.cdrID, m.Method)
+		go webhook.NotifyEnded(context.Background(), s.pool, br.cdrID)
+		return sipResponse(m, 200, "OK")
+	}
+	if (m.Method == "BYE" || m.Method == "CANCEL") && br.ivrMenuSlug != "" && br.voicemailRecorder == nil {
 		s.tearDownCall(br, br.LegACallID)
 		_ = s.pool.UpdateCDREnded(ctx, br.cdrID, m.Method)
 		go webhook.NotifyEnded(context.Background(), s.pool, br.cdrID)

@@ -3,6 +3,8 @@ package webrtcmedia
 import (
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,9 +23,26 @@ type Bridge struct {
 	wg        sync.WaitGroup
 }
 
+func parseICEServers() []webrtc.ICEServer {
+	raw := os.Getenv("SMURF_ICE_SERVERS")
+	if raw == "" {
+		return nil
+	}
+	var out []webrtc.ICEServer
+	for _, u := range strings.Split(raw, ",") {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		out = append(out, webrtc.ICEServer{URLs: []string{u}})
+	}
+	return out
+}
+
 // NewBridge applies the browser SDP offer, returns the SDP answer and starts RTP relay.
 func NewBridge(offerSDP, relayHost string, relayRTPPort int) (answerSDP string, cleanup func(), err error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	cfg := webrtc.Configuration{ICEServers: parseICEServers()}
+	pc, err := webrtc.NewPeerConnection(cfg)
 	if err != nil {
 		return "", nil, err
 	}

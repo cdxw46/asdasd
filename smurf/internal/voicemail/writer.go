@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +26,31 @@ type DepositRecorder struct {
 	wg      sync.WaitGroup
 	maxDur  time.Duration
 	started time.Time
+}
+
+// NewPCMURecorder writes to an explicit WAV path (PCMU RTP in).
+func NewPCMURecorder(bindIP, wavPath string) (*DepositRecorder, error) {
+	if err := os.MkdirAll(filepath.Dir(wavPath), 0755); err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(bindIP)
+	if ip == nil {
+		return nil, fmt.Errorf("bad bind ip")
+	}
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: 0})
+	if err != nil {
+		return nil, err
+	}
+	r := &DepositRecorder{
+		conn:   c,
+		path:   wavPath,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+		maxDur: 60 * time.Minute,
+	}
+	r.wg.Add(1)
+	go r.loop()
+	return r, nil
 }
 
 func NewDepositRecorder(bindIP string, outDir string) (*DepositRecorder, error) {
@@ -54,6 +80,11 @@ func NewDepositRecorder(bindIP string, outDir string) (*DepositRecorder, error) 
 
 func (r *DepositRecorder) LocalPort() int {
 	return r.conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+func (r *DepositRecorder) LocalAddr() string {
+	a := r.conn.LocalAddr().(*net.UDPAddr)
+	return net.JoinHostPort(a.IP.String(), strconv.Itoa(a.Port))
 }
 
 func (r *DepositRecorder) Path() string { return r.path }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,14 +60,14 @@ type Server struct {
 }
 
 type callBridge struct {
-	LegACallID string // caller dialog (e.g. WebSocket client)
-	LegBCallID string // toward callee (UDP/TCP leg)
-	CallerWS   *wssip.Session
-	CalleeWS   *wssip.Session // if callee registered over WS
-	fromExt    string
-	toExt      string
-	cdrID      int64
-	relayPorts [2]int // A,B
+	LegACallID    string // caller dialog (e.g. WebSocket client)
+	LegBCallID    string // toward callee (UDP/TCP leg)
+	CallerWS      *wssip.Session
+	CalleeWS      *wssip.Session // if callee registered over WS
+	fromExt       string
+	toExt         string
+	cdrID         int64
+	relayPorts    [2]int // A,B
 	webrtcCleanup func()
 
 	callerReg *db.Registration // cached for BYE from callee toward UDP caller
@@ -82,6 +83,13 @@ type callBridge struct {
 	// Outbound trunk PSTN leg
 	outboundTrunk *db.SIPTrunk
 	trunkDialog   *trunk.Dialog
+
+	// Call recording (relay tap → leg A RTP copy, PCMU → WAV)
+	callRecording *voicemail.DepositRecorder
+
+	// IVR (welcome WAV on relay leg B; DTMF via INFO)
+	ivrMenuSlug    string
+	ivrWelcomeStop chan struct{}
 }
 
 func main() {
@@ -113,17 +121,17 @@ func main() {
 	}
 
 	s := &Server{
-		realm:           *realm,
-		publicIP:        *publicIP,
-		sipPort:         sipPort,
-		relayBind:       *relayBind,
-		relayCtrl:       *relayCtrl,
-		pool:            pool,
-		relay:           relay.New(*relayCtrl),
-		nonces:          map[string]nonceEntry{},
-		calls:           map[string]*callBridge{},
-		wsSessions:      map[string]*wssip.Session{},
-		pendingWSResp:   map[string]chan *sip.Message{},
+		realm:         *realm,
+		publicIP:      *publicIP,
+		sipPort:       sipPort,
+		relayBind:     *relayBind,
+		relayCtrl:     *relayCtrl,
+		pool:          pool,
+		relay:         relay.New(*relayCtrl),
+		nonces:        map[string]nonceEntry{},
+		calls:         map[string]*callBridge{},
+		wsSessions:    map[string]*wssip.Session{},
+		pendingWSResp: map[string]chan *sip.Message{},
 	}
 
 	pc, err := net.ListenPacket("udp", *udpAddr)
@@ -197,6 +205,10 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func (s *Server) OpenSessionWithTap(id, tap string) (int, int, error) {
+	return s.relay.OpenSessionWithTap(id, tap)
 }
 
 func (s *Server) serveUDP(c *net.UDPConn) {
@@ -312,6 +324,10 @@ func (s *Server) handleMessageWithWS(ws *wssip.Session, m *sip.Message, transpor
 		return s.handleRegister(ctx, ws, m, transport, raddr, udpRaddr, udpConn, tcpConn)
 	case m.IsRequest && m.Method == "INVITE":
 		return s.handleInvite(ctx, ws, m, transport, raddr, udpRaddr, udpConn, tcpConn)
+	case m.IsRequest && m.Method == "INFO":
+		return s.handleINFO(ctx, ws, m, transport)
+	case m.IsRequest && m.Method == "NOTIFY":
+		return s.handleNOTIFY(ctx, m, transport)
 	case m.IsRequest && m.Method == "ACK":
 		s.forwardMidDialogNoResponse(ctx, m, transport)
 		return nil
@@ -342,7 +358,7 @@ func isWebRTCJSONInvite(m *sip.Message) bool {
 
 func (s *Server) okOptions(m *sip.Message) *sip.Message {
 	resp := sipResponse(m, 200, "OK")
-	resp.AddHeader("Allow", "INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER")
+	resp.AddHeader("Allow", "INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER, INFO, NOTIFY")
 	resp.AddHeader("Accept", "application/sdp")
 	resp.AddHeader("Supported", "100rel, timer")
 	resp.AddHeader("Content-Length", "0")
@@ -524,6 +540,7 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	}
 
 	callID := m.Headers.Get("call-id")
+	to = s.resolveInviteTarget(ctx, to)
 
 	if _, err := s.pool.GetCallQueue(ctx, to); err == nil {
 		return s.handleInviteToQueue(ctx, ws, m, transport, from, to, callID, callerReg)
@@ -537,9 +554,14 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 		return s.handleInviteThroughTrunks(ctx, ws, m, transport, from, to, callID, callerReg)
 	}
 
+	if _, err := s.pool.GetIVRMenu(ctx, to); err == nil {
+		return s.handleInviteIVR(ctx, ws, m, transport, from, to, callID, callerReg)
+	}
+
 	if _, err := s.pool.GetExtension(ctx, to); err != nil {
 		return sipResponse(m, 404, "Not Found")
 	}
+	calleeExt, _ := s.pool.GetExtension(ctx, to)
 	reg, err := s.pool.GetRegistration(ctx, to)
 	if err != nil {
 		return sipResponse(m, 480, "Temporarily Unavailable")
@@ -549,9 +571,34 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 		return s.handleInviteWebRTC(ctx, m, ws, from, to, callID, callerReg)
 	}
 
-	rtpA, rtpB, err := s.relay.OpenSession(callID)
-	if err != nil {
-		log.Printf("relay: %v", err)
+	var rtpA, rtpB int
+	var rec *voicemail.DepositRecorder
+	tapAddr := ""
+	if calleeExt != nil && caller != nil && (calleeExt.RecordCalls || caller.RecordCalls) {
+		recDir := getenv("SMURF_RECORDINGS_DIR", "/var/lib/smurf/recordings")
+		_ = os.MkdirAll(recDir, 0755)
+		p := filepath.Join(recDir, fmt.Sprintf("rec-%s-%d.wav", callID[:12], time.Now().UnixNano()))
+		r, err := voicemail.NewPCMURecorder(s.relayBind, p)
+		if err == nil {
+			rec = r
+			host := "127.0.0.1"
+			if ip := net.ParseIP(s.relayBind); ip != nil && !ip.IsUnspecified() {
+				host = ip.String()
+			}
+			tapAddr = net.JoinHostPort(host, strconv.Itoa(r.LocalPort()))
+		}
+	}
+	var rerr error
+	if tapAddr != "" {
+		rtpA, rtpB, rerr = s.relay.OpenSessionWithTap(callID, tapAddr)
+	} else {
+		rtpA, rtpB, rerr = s.relay.OpenSession(callID)
+	}
+	if rerr != nil {
+		if rec != nil {
+			_ = rec.Close()
+		}
+		log.Printf("relay: %v", rerr)
 		return sipResponse(m, 500, "Relay Error")
 	}
 	cdrID, err := s.pool.InsertCDR(ctx, callID, from, to, "internal")
@@ -562,7 +609,7 @@ func (s *Server) handleInvite(ctx context.Context, ws *wssip.Session, m *sip.Mes
 	br := &callBridge{
 		LegACallID: callID, LegBCallID: callID + "-b", CallerWS: ws, CalleeWS: calleeWSSession(s, reg),
 		fromExt: from, toExt: to, cdrID: cdrID, relayPorts: [2]int{rtpA, rtpB},
-		callerReg: callerReg,
+		callerReg: callerReg, callRecording: rec,
 	}
 	s.callMu.Lock()
 	s.calls[callID] = br

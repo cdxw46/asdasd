@@ -196,13 +196,13 @@ func main() {
 				return
 			}
 			type row struct {
-				ID       int64  `json:"id"`
-				Name     string `json:"name"`
-				SipHost  string `json:"sip_host"`
-				SipPort  int    `json:"sip_port"`
+				ID        int64  `json:"id"`
+				Name      string `json:"name"`
+				SipHost   string `json:"sip_host"`
+				SipPort   int    `json:"sip_port"`
 				Transport string `json:"transport"`
-				Priority int    `json:"priority"`
-				Enabled  bool   `json:"enabled"`
+				Priority  int    `json:"priority"`
+				Enabled   bool   `json:"enabled"`
 			}
 			out := make([]row, 0, len(list))
 			for _, t := range list {
@@ -211,17 +211,17 @@ func main() {
 			writeJSON(w, map[string]any{"trunks": out})
 		case http.MethodPost:
 			var body struct {
-				Name          string `json:"name"`
-				SipHost       string `json:"sip_host"`
-				SipPort       int    `json:"sip_port"`
-				Transport     string `json:"transport"`
-				AuthUsername  string `json:"auth_username"`
-				AuthPassword  string `json:"auth_password"`
-				FromUser      string `json:"from_user"`
-				RegisterURI   string `json:"register_uri"`
-				ContactUser   string `json:"contact_user"`
-				Priority      int    `json:"priority"`
-				Enabled       *bool  `json:"enabled"`
+				Name         string `json:"name"`
+				SipHost      string `json:"sip_host"`
+				SipPort      int    `json:"sip_port"`
+				Transport    string `json:"transport"`
+				AuthUsername string `json:"auth_username"`
+				AuthPassword string `json:"auth_password"`
+				FromUser     string `json:"from_user"`
+				RegisterURI  string `json:"register_uri"`
+				ContactUser  string `json:"contact_user"`
+				Priority     int    `json:"priority"`
+				Enabled      *bool  `json:"enabled"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "bad json", http.StatusBadRequest)

@@ -234,6 +234,18 @@ func (s *Server) tearDownCall(br *callBridge, callID string) {
 	if br == nil {
 		return
 	}
+	if br.ivrWelcomeStop != nil {
+		select {
+		case <-br.ivrWelcomeStop:
+		default:
+			close(br.ivrWelcomeStop)
+		}
+		br.ivrWelcomeStop = nil
+	}
+	if br.callRecording != nil {
+		_ = br.callRecording.Close()
+		br.callRecording = nil
+	}
 	s.relay.CloseSession(callID)
 	s.callMu.Lock()
 	delete(s.calls, br.LegACallID)

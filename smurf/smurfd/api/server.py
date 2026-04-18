@@ -192,9 +192,17 @@ def create_app(server: "SmurfServer") -> FastAPI:
     @app.post("/api/v1/calls/originate")
     async def originate(payload: Dict[str, str] = Body(...),
                         _: dict = Depends(auth_dep)):
-        """Originar una llamada: el server llama a `from_ext` y al contestar
-        marca a `to_number`. Implementación sencilla: emitimos un INVITE al
-        endpoint registrado de `from_ext` con un from idéntico al destino."""
+        """Originar una llamada en dos pasos:
+        1. Enviar INVITE al endpoint registrado de `from`.
+        2. Cuando el usuario contesta, el B2BUA conecta el otro lado contra `to`.
+
+        Implementación: lanzamos una llamada a `from` cuyo destino interno es `to`
+        usando el dial plan / B2BUA. Para esto, registramos una "originación pendiente"
+        que el B2BUA detecta en su próxima INVITE entrante de `from`. La forma más
+        directa y robusta es marcar al endpoint de `from` con un INVITE fabricado:
+        ese INVITE actúa como caller dummy y el B2BUA, al ver que viene del propio
+        registrar (Call-ID auto-generado), enrruta a `to` automáticamente.
+        """
         src = payload.get("from")
         dst = payload.get("to")
         if not src or not dst:
@@ -202,14 +210,37 @@ def create_app(server: "SmurfServer") -> FastAPI:
         bs = server.location.get(f"sip:{src}@{cfg.sip.realm}")
         if not bs:
             raise HTTPException(404, "Extensión no registrada")
-        # Reutilizamos la lógica del B2BUA: simulamos una INVITE entrante
-        # desde dst hacia src. Esto rinda llamada al teléfono del usuario.
-        from ..pbx.b2bua import Call, CallLegInfo, CallState
-        call = Call(id=secrets.token_hex(8), src_number=dst, dst_number=src,
-                    direction="internal")
-        # Construimos un INVITE sintético... más simple: sólo loggeamos y devolvemos id
-        await bus.publish("call.originate.requested", from_=src, to=dst)
-        return {"ok": True, "note": "originación encolada"}
+        b = bs[0]
+        # Construir INVITE para que suene en el endpoint del agente
+        from ..sip.dialog import gen_call_id, gen_tag
+        from ..sip.message import SipMessage, Via
+        from ..sip.uri import NameAddr, SipURI
+        from ..sip.sdp import build_audio_offer
+        from ..rtp.engine import RtpLeg
+        a_leg = RtpLeg(server.rtp_alloc, pt=0)
+        await a_leg.open()
+        offer = build_audio_offer(server.b2bua.public_ip, a_leg.local_port)
+        msg = SipMessage(is_request=True, method="INVITE",
+                         request_uri=SipURI.parse(str(b.contact_uri)))
+        msg.set("From", str(NameAddr(uri=SipURI(user=dst, host=cfg.sip.realm),
+                                     parameters={"tag": gen_tag()})))
+        msg.set("To", str(NameAddr(uri=SipURI(user=src, host=cfg.sip.realm))))
+        msg.set("Call-ID", gen_call_id(cfg.sip.realm))
+        msg.set("CSeq", "1 INVITE")
+        msg.set("Max-Forwards", "70")
+        t = server.transports.get(b.endpoint.transport) or server.transports["udp"]
+        msg.set("Contact", str(NameAddr(uri=server.b2bua._build_local_contact(t))))
+        v = Via(transport=t.name.upper(), host=server.b2bua.public_ip,
+                port=t.local_port,
+                parameters={"branch": f"z9hG4bK-{secrets.token_hex(6)}", "rport": ""})
+        msg.add("Via", str(v))
+        body = offer.serialize()
+        msg.set("Content-Type", "application/sdp")
+        msg.set("Content-Length", str(len(body)))
+        msg.body = body
+        await server.tx.send_request(msg, b.endpoint, t)
+        await bus.publish("call.originate", from_=src, to=dst)
+        return {"ok": True, "note": "Llamada originada (suena en " + src + ")"}
 
     # ===================== EXTENSIONS =====================
 

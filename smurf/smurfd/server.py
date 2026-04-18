@@ -188,6 +188,12 @@ class SmurfServer:
         for t in self.transports.values():
             try: await t.stop()
             except Exception: pass
+        # Cancelar callbacks pendientes que pudieran tocar la DB tras el cierre
+        await asyncio.sleep(0.05)
+        if self.b2bua:
+            for c in list(self.b2bua.calls.values()):
+                try: await self.b2bua._end_call(c, "CANCELLED", "shutdown")
+                except Exception: pass
         if self.db: await self.db.close()
         self._stop.set()
 

@@ -1,0 +1,170 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1014;
+  --panel: #151a22;
+  --text: #e8edf5;
+  --muted: #a2afc2;
+  --primary: #2d79ff;
+  --border: #273142;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 10px;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  padding: 18px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.kpi {
+  border: 1px solid var(--border);
+  background: #11161d;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.kpi .label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.kpi .value {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #10151c;
+  color: var(--text);
+}
+
+button {
+  background: var(--primary);
+  color: white;
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #1c2533;
+  border: 1px solid var(--border);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 6px;
+  font-size: 13px;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.status {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+.status.ok {
+  color: #79d68c;
+}
+
+.status.bad {
+  color: #f98f8f;
+}
+
+#logBox {
+  max-height: 240px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: #0f141a;
+}

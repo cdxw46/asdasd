@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0d1b2a" />
+    <title>SMURF PBX Admin</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>SMURF PBX</h1>
+      <div class="row">
+        <span id="status" class="status">Sin sesión</span>
+        <button id="btn-logout" class="secondary">Cerrar sesión</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="auth-panel" class="panel">
+        <h2>Acceso administrador</h2>
+        <div class="row">
+          <div>
+            <label for="username">Usuario</label>
+            <input id="username" value="admin" />
+          </div>
+          <div>
+            <label for="password">Clave</label>
+            <input id="password" type="password" value="smurfadmin" />
+          </div>
+          <div>
+            <label for="otp">OTP (si aplica)</label>
+            <input id="otp" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-login">Entrar</button>
+        </div>
+        <p class="muted">Credenciales por defecto: admin / smurfadmin</p>
+      </section>
+
+      <section id="dashboard-panel" class="hidden">
+        <section class="panel">
+          <h2>Dashboard</h2>
+          <div class="row">
+            <button id="btn-refresh">Actualizar</button>
+          </div>
+          <div class="kpis">
+            <div class="kpi">
+              <div class="label">Llamadas activas</div>
+              <div id="kpi-active-calls" class="value">0</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Extensiones registradas</div>
+              <div id="kpi-registered" class="value">0</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Trunks activos</div>
+              <div id="kpi-trunks" class="value">0</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Llamadas hoy</div>
+              <div id="kpi-calls-today" class="value">0</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h3>Llamadas activas (detalle)</h3>
+          <pre id="active-calls"></pre>
+        </section>
+
+        <section class="panel">
+          <h3>Extensiones</h3>
+          <pre id="extensions"></pre>
+          <h3>Crear extensión</h3>
+          <div class="row">
+            <div>
+              <label for="new-extension">Extensión</label>
+              <input id="new-extension" value="1002" />
+            </div>
+            <div>
+              <label for="new-display">Nombre</label>
+              <input id="new-display" value="Test User 1002" />
+            </div>
+            <div>
+              <label for="new-auth-user">Auth user</label>
+              <input id="new-auth-user" value="1002" />
+            </div>
+            <div>
+              <label for="new-auth-pass">Auth pass</label>
+              <input id="new-auth-pass" value="smurf1002" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="btn-create-ext">Crear</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h3>CDR</h3>
+          <div class="row">
+            <button id="btn-export-csv" class="secondary">Exportar CSV</button>
+            <button id="btn-export-xlsx" class="secondary">Exportar Excel</button>
+          </div>
+          <pre id="cdr"></pre>
+        </section>
+
+        <section class="panel">
+          <h3>Chat interno</h3>
+          <div class="row">
+            <div>
+              <label for="chat-from">Desde</label>
+              <input id="chat-from" value="1000" />
+            </div>
+            <div>
+              <label for="chat-to">Hasta</label>
+              <input id="chat-to" value="1001" />
+            </div>
+            <div>
+              <label for="chat-message">Mensaje</label>
+              <input id="chat-message" value="Hola desde SMURF" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="btn-chat-send">Enviar mensaje</button>
+          </div>
+          <pre id="chat-history"></pre>
+        </section>
+
+        <section class="panel">
+          <h3>Presencia</h3>
+          <div class="row">
+            <div>
+              <label for="presence-ext">Extensión</label>
+              <input id="presence-ext" value="1000" />
+            </div>
+            <div>
+              <label for="presence-status">Estado</label>
+              <input id="presence-status" value="available" />
+            </div>
+            <div>
+              <label for="presence-note">Nota</label>
+              <input id="presence-note" value="" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="btn-presence">Actualizar presencia</button>
+          </div>
+          <pre id="presence"></pre>
+        </section>
+
+        <section class="panel">
+          <h3>Softphone Web SIP/WS</h3>
+          <div class="row">
+            <div>
+              <label for="sp-ext">Extensión</label>
+              <input id="sp-ext" value="1000" />
+            </div>
+            <div>
+              <label for="sp-pass">Password</label>
+              <input id="sp-pass" value="smurf1000" />
+            </div>
+            <div>
+              <label for="sp-domain">Dominio</label>
+              <input id="sp-domain" value="smurf.local" />
+            </div>
+            <div>
+              <label for="sp-ws">WS URL</label>
+              <input id="sp-ws" value="" />
+            </div>
+            <div>
+              <label for="sp-target">Destino</label>
+              <input id="sp-target" value="1001" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="sp-register">Conectar SIP WS</button>
+            <button id="sp-call">Llamar</button>
+            <button id="sp-hangup" class="secondary">Colgar</button>
+          </div>
+          <pre id="softphone-log"></pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

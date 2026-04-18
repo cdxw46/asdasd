@@ -1,0 +1,18 @@
+[Unit]
+Description=SMURF watchdog supervisor
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=smurf
+Group=smurf
+WorkingDirectory=/opt/smurf
+Environment=SMURF_CONFIG=/etc/smurf/config.yml
+ExecStart=/opt/smurf-venv/bin/python /opt/smurf/services/watchdog/main.py --config /etc/smurf/config.yml
+Restart=always
+RestartSec=2
+LimitNOFILE=131072
+
+[Install]
+WantedBy=multi-user.target

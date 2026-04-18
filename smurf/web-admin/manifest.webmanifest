@@ -1,0 +1,10 @@
+{
+  "name": "SMURF PBX",
+  "short_name": "SMURF",
+  "description": "SMURF enterprise PBX admin and softphone",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#1f6feb",
+  "icons": []
+}

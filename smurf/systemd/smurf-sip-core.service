@@ -1,0 +1,20 @@
+[Unit]
+Description=SMURF SIP Core Service
+After=network-online.target smurf-pbx-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smurf
+Group=smurf
+WorkingDirectory=/opt/smurf
+Environment=PYTHONUNBUFFERED=1
+Environment=SMURF_CONFIG=/etc/smurf/config.yml
+ExecStart=/opt/smurf-venv/bin/python /opt/smurf/services/sip-core/main.py --config /etc/smurf/config.yml
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

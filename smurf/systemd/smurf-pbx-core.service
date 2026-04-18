@@ -1,0 +1,18 @@
+[Unit]
+Description=SMURF PBX Core
+After=network.target
+
+[Service]
+Type=simple
+User=smurf
+Group=smurf
+WorkingDirectory=/opt/smurf
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/smurf-venv/bin/python /opt/smurf/services/pbx-core/main.py --config /etc/smurf/config.yml
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

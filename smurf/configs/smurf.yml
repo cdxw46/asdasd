@@ -1,0 +1,64 @@
+global:
+  domain: smurf.local
+  timezone: UTC
+  default_language: es
+  log_level: INFO
+  media_public_ip: 127.0.0.1
+  max_global_calls: 500
+
+security:
+  jwt_secret: "change-me-smurf-secret"
+  access_token_minutes: 30
+  refresh_token_minutes: 1440
+  require_tls_for_sip: false
+  sip_realm: "smurf.local"
+  failed_auth_block_threshold: 10
+  failed_auth_window_seconds: 300
+  block_duration_seconds: 1800
+  web_2fa_issuer: "SMURF PBX"
+
+sip:
+  udp_host: "0.0.0.0"
+  udp_port: 5060
+  tcp_host: "0.0.0.0"
+  tcp_port: 5060
+  tls_host: "0.0.0.0"
+  tls_port: 5061
+  ws_host: "0.0.0.0"
+  ws_port: 5062
+  allowed_transports:
+    - UDP
+    - TCP
+    - TLS
+    - WS
+  registration_min_expires: 60
+  registration_max_expires: 3600
+  qualify_interval_seconds: 30
+
+rtp:
+  bind_host: "0.0.0.0"
+  min_port: 20000
+  max_port: 40000
+  srtp_enabled: false
+  jitter_buffer_ms: 60
+  dscp: 46
+  rtcp_interval_seconds: 5
+  recording_path: "/var/lib/smurf/recordings"
+  moh_path: "/var/lib/smurf/moh"
+
+api:
+  host: "0.0.0.0"
+  port: 5001
+  tls_cert_path: "/etc/smurf/tls/server.crt"
+  tls_key_path: "/etc/smurf/tls/server.key"
+  cors_origins:
+    - "*"
+
+database:
+  sqlite_path: "/var/lib/smurf/smurf.db"
+
+provisioning:
+  host: "0.0.0.0"
+  port: 8088
+  templates_path: "/opt/smurf/provisioning-templates"
+  base_url: "https://127.0.0.1:5001/provisioning"

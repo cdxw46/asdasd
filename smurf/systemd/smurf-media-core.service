@@ -1,0 +1,21 @@
+[Unit]
+Description=SMURF Media Core Service
+After=network.target smurf-pbx-core.service
+Requires=smurf-pbx-core.service
+
+[Service]
+Type=simple
+User=smurf
+Group=smurf
+WorkingDirectory=/opt/smurf
+Environment=PYTHONUNBUFFERED=1
+Environment=SMURF_CONFIG=/etc/smurf/config.yml
+ExecStart=/opt/smurf-venv/bin/python /opt/smurf/services/media-core/main.py --config /etc/smurf/config.yml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

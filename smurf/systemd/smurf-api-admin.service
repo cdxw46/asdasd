@@ -1,0 +1,18 @@
+[Unit]
+Description=SMURF API/Admin Service
+After=network.target smurf-pbx-core.service smurf-media-core.service smurf-sip-core.service
+Wants=smurf-pbx-core.service smurf-media-core.service smurf-sip-core.service
+
+[Service]
+Type=simple
+User=smurf
+Group=smurf
+WorkingDirectory=/opt/smurf
+Environment=PYTHONUNBUFFERED=1
+Environment=SMURF_CONFIG=/etc/smurf/config.yml
+ExecStart=/opt/smurf-venv/bin/python /opt/smurf/services/api-admin/main.py --config /etc/smurf/config.yml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+.pytest_cache/
+.tmp/
+sounds/cache/
+recordings/
+voicemail/
+*.pem
+*.key
+config/smurf.local.json

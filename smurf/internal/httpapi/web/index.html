@@ -166,6 +166,18 @@
       <pre id="softphoneLog">Disconnected</pre>
     </section>
 
+    <section class="card">
+      <h2>Browser WebRTC</h2>
+      <div class="grid-2">
+        <input id="browserExt" placeholder="Browser extension" value="1000">
+        <input id="browserTarget" placeholder="Remote extension" value="1001">
+      </div>
+      <div class="row">
+        <button onclick="startBrowserSession()">Create browser session</button>
+      </div>
+      <pre id="webrtcLog">No browser media session</pre>
+    </section>
+
     <section class="card" style="grid-column: span 2;">
       <h2>Extensions</h2>
       <table>
@@ -231,6 +243,8 @@
     let sipCallId = null;
     let sipCseq = 1;
     let sipTag = Math.random().toString(16).slice(2, 10);
+    let browserSessionId = "";
+    let browserPeer = null;
 
     function authHeaders() {
       return token ? { Authorization: `Bearer ${token}` } : {};
@@ -347,6 +361,12 @@
 
     function appendSoftphoneLog(text) {
       const el = document.getElementById("softphoneLog");
+      el.textContent += `\n${text}`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function appendWebRTCLog(text) {
+      const el = document.getElementById("webrtcLog");
       el.textContent += `\n${text}`;
       el.scrollTop = el.scrollHeight;
     }
@@ -489,6 +509,62 @@
         document.getElementById("recordingsLog").textContent = JSON.stringify(snapshot.recordings || [], null, 2);
       } catch (err) {
         document.getElementById("snapshot").textContent = err.message;
+      }
+    }
+
+    async function startBrowserSession() {
+      try {
+        const extension = document.getElementById("browserExt").value;
+        const remoteExtension = document.getElementById("browserTarget").value;
+        const session = await request("/api/browser/session", {
+          method: "POST",
+          body: JSON.stringify({
+            extension,
+            remote_extension: remoteExtension
+          })
+        });
+        browserSessionId = session.session_id;
+        appendWebRTCLog(`session ${browserSessionId}`);
+
+        const offer = await request("/api/webrtc/offer", {
+          method: "POST",
+          body: JSON.stringify({ session_id: browserSessionId })
+        });
+        appendWebRTCLog("offer created");
+
+        browserPeer = new RTCPeerConnection({ iceServers: [] });
+        browserPeer.ontrack = (event) => {
+          appendWebRTCLog(`track ${event.track.kind}`);
+          const audio = document.getElementById("remoteAudio") || document.createElement("audio");
+          audio.id = "remoteAudio";
+          audio.autoplay = true;
+          audio.controls = true;
+          audio.srcObject = event.streams[0];
+          document.body.appendChild(audio);
+        };
+
+        const local = await navigator.mediaDevices.getUserMedia({ audio: true });
+        for (const track of local.getTracks()) {
+          browserPeer.addTrack(track, local);
+        }
+
+        await browserPeer.setRemoteDescription({
+          type: offer.type,
+          sdp: offer.sdp
+        });
+        const answer = await browserPeer.createAnswer();
+        await browserPeer.setLocalDescription(answer);
+
+        await request("/api/webrtc/answer", {
+          method: "POST",
+          body: JSON.stringify({
+            session_id: browserSessionId,
+            sdp: answer.sdp
+          })
+        });
+        appendWebRTCLog("answer applied");
+      } catch (err) {
+        appendWebRTCLog(`error: ${err.message}`);
       }
     }
 

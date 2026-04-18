@@ -16,6 +16,7 @@ import (
 	"smurf/internal/rtp"
 	"smurf/internal/sip"
 	"smurf/internal/util"
+	"smurf/internal/webrtcgw"
 )
 
 func main() {
@@ -40,7 +41,8 @@ func main() {
 	rtpManager := rtp.NewManager(cfg)
 	pbxEngine := pbx.New(store, rtpManager, logger)
 	sipServer := sip.NewServer(cfg, store, logger, pbxEngine)
-	httpServer := httpapi.New(cfg, store, pbxEngine, logger)
+	webrtcGateway := webrtcgw.New(cfg, pbxEngine, logger)
+	httpServer := httpapi.New(cfg, store, pbxEngine, webrtcGateway, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

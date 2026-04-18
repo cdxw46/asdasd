@@ -19,6 +19,7 @@ import (
 	"smurf/internal/pbx"
 	"smurf/internal/realtime"
 	"smurf/internal/util"
+	"smurf/internal/webrtcgw"
 	"smurf/internal/ws"
 )
 
@@ -32,11 +33,12 @@ type Server struct {
 	logger   *util.Logger
 	hub      *realtime.Hub
 	ws       *ws.Server
+	webrtc   *webrtcgw.Gateway
 	http     *http.Server
 	tokenTTL time.Duration
 }
 
-func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, logger *util.Logger) *Server {
+func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, webrtcGateway *webrtcgw.Gateway, logger *util.Logger) *Server {
 	hub := realtime.NewHub()
 	s := &Server{
 		cfg:      cfg,
@@ -44,6 +46,7 @@ func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, logger *uti
 		pbx:      pbxEngine,
 		logger:   logger,
 		hub:      hub,
+		webrtc:   webrtcGateway,
 		tokenTTL: time.Duration(cfg.Security.AdminTokenHours) * time.Hour,
 	}
 	s.ws = ws.New(cfg, store, logger, hub, nil)
@@ -59,6 +62,8 @@ func New(cfg *config.Config, store *db.Store, pbxEngine *pbx.Engine, logger *uti
 	mux.Handle("/api/chat", s.authRequired(http.HandlerFunc(s.handleChat)))
 	mux.Handle("/api/voicemail", s.authRequired(http.HandlerFunc(s.handleVoicemail)))
 	mux.Handle("/api/recordings", s.authRequired(http.HandlerFunc(s.handleRecordings)))
+	mux.Handle("/api/webrtc/offer", s.authRequired(http.HandlerFunc(s.handleWebRTCOffer)))
+	mux.Handle("/api/webrtc/answer", s.authRequired(http.HandlerFunc(s.handleWebRTCAnswer)))
 	mux.Handle("/ws", s.ws)
 	mux.Handle("/", s.staticHandler())
 
@@ -416,6 +421,55 @@ func (s *Server) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		SessionID  string `json:"session_id"`
+		Extension  string `json:"extension"`
+		RemoteExt  string `json:"remote_extension"`
+		CallID     string `json:"call_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if strings.TrimSpace(body.SessionID) == "" {
+		body.SessionID = auth.RandomHex(8)
+	}
+	if strings.TrimSpace(body.CallID) == "" {
+		body.CallID = auth.RandomHex(12)
+	}
+	result, err := s.webrtc.CreateOffer(r.Context(), body.SessionID, body.Extension, body.RemoteExt, body.CallID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleWebRTCAnswer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+		SDP       string `json:"sdp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := s.webrtc.ApplyAnswer(strings.TrimSpace(body.SessionID), body.SDP); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {

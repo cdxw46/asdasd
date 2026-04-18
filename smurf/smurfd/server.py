@@ -45,7 +45,7 @@ class SmurfServer:
         self.firewall: Optional[Firewall] = None
         self._stop = asyncio.Event()
 
-    async def start(self) -> None:
+    async def start(self, with_api: bool = True) -> None:
         for d in (self.cfg.storage.recordings_dir,
                   self.cfg.storage.voicemail_dir,
                   self.cfg.storage.sounds_dir,
@@ -116,6 +116,31 @@ class SmurfServer:
                  self.b2bua.public_ip,
                  self.cfg.web.https_port)
 
+        if with_api:
+            await self._start_api()
+
+    async def _start_api(self) -> None:
+        from .api.server import create_app
+        import uvicorn
+        app = create_app(self)
+        ssl_kw = {}
+        if self.cfg.web.tls_cert and self.cfg.web.tls_key \
+                and os.path.exists(self.cfg.web.tls_cert) \
+                and os.path.exists(self.cfg.web.tls_key):
+            ssl_kw = {"ssl_keyfile": self.cfg.web.tls_key,
+                      "ssl_certfile": self.cfg.web.tls_cert}
+            port = self.cfg.web.https_port
+        else:
+            port = self.cfg.web.http_port if self.cfg.web.http_port else self.cfg.web.https_port
+        if port:
+            cfg = uvicorn.Config(app, host=self.cfg.web.bind, port=port,
+                                 log_level=self.cfg.log_level.lower(),
+                                 access_log=False, **ssl_kw)
+            self._uv = uvicorn.Server(cfg)
+            self._uv_task = asyncio.create_task(self._uv.serve())
+            log.info("Panel admin escuchando en %s://%s:%d",
+                     "https" if ssl_kw else "http", self.cfg.web.bind, port)
+
     async def _start_transports(self) -> None:
         async def router(msg, ep: Endpoint, transport: Transport):
             if not self.firewall or self.firewall.check_packet(ep.host):
@@ -157,6 +182,9 @@ class SmurfServer:
 
     async def stop(self) -> None:
         log.info("Parando SMURF…")
+        if hasattr(self, "_uv"):
+            try: self._uv.should_exit = True
+            except Exception: pass
         for t in self.transports.values():
             try: await t.stop()
             except Exception: pass

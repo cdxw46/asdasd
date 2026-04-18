@@ -1,0 +1,15 @@
+{
+  "name": "SMURF PBX",
+  "short_name": "SMURF",
+  "description": "Panel de administración y softphone SMURF",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c1220",
+  "theme_color": "#0c1220",
+  "icons": [
+    {"src": "/static/img/logo.svg", "sizes": "any", "type": "image/svg+xml"},
+    {"src": "/static/img/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/static/img/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}

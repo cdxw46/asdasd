@@ -14,7 +14,9 @@ Telegram  ──►  Bot (Python)  ──ARI──►  Asterisk  ──SIP──
 
 ## Qué hace
 
-- Menú con botones (Llamar · Locuciones · Historial · Configuración).
+- Menú con botones (Llamar · Locuciones · Agentes · Historial · Configuración).
+- **Gestión de agentes desde el bot**: crear/borrar usuarios SIP y generar un
+  **QR** para configurar Zoiper/PortSIP en segundos.
 - Lista de números pegada en Telegram (uno por línea, comas o espacios).
 - Confirmación con botón antes de llamar.
 - Llamadas en paralelo con límite configurable (`MAX_CONCURRENT_CALLS`).
@@ -59,6 +61,10 @@ piensa-dialer/
         ├── dialer.py         # motor de campaña (estados de llamada)
         ├── ari.py            # cliente ARI async (REST + websocket)
         ├── locuciones.py     # librería de locuciones (MP3/TTS + índice)
+        ├── agentes.py        # usuarios SIP dinámicos + include PJSIP
+        ├── ami.py            # cliente AMI (recarga PJSIP)
+        ├── provisioning.py   # servidor HTTP de provisioning (QR Zoiper)
+        ├── qr.py             # generación de QR
         ├── tts.py            # conversión de audio + síntesis de voz
         ├── numbers.py        # parseo/normalización de números
         └── config.py
@@ -113,27 +119,32 @@ docker compose exec asterisk asterisk -rx "pjsip show endpoints"
 6. Abre Telegram, habla con tu bot, `/start`, pega una lista de números y pulsa
    **📞 Llamar**.
 
-## Agente con Zoiper / PortSIP
+## Agentes (Zoiper / PortSIP) y QR
 
-Por defecto (`AGENT_MODE=sip`) al pulsar **1** la llamada va a un **softphone
-SIP** que el agente registra en su móvil/PC. Configura en Zoiper/PortSIP:
+Por defecto (`AGENT_MODE=sip`) al pulsar **1** la llamada va a los **softphones
+SIP** de los agentes (grupo de timbrado: suena en todos los registrados y el
+primero que descuelga se queda la llamada).
 
-| Campo        | Valor                                    |
-|--------------|------------------------------------------|
-| Dominio/Host | `IP pública de tu servidor`              |
-| Usuario      | `AGENT_SIP_USER` (por defecto `agente1`) |
-| Contraseña   | `AGENT_SIP_PASSWORD` (la de tu `.env`)   |
-| Transporte   | UDP (o TCP/TLS)                          |
+Los agentes se gestionan **desde el bot** (menú → **👥 Agentes**):
 
-Comprueba que el agente está registrado:
+- **➕ Crear agente**: escribes un nombre y el bot crea un usuario SIP con
+  contraseña aleatoria, recarga Asterisk (vía AMI) y te devuelve un **QR**.
+- El agente abre Zoiper → «Iniciar sesión con QR» → escanea → queda
+  configurado solo (provisioning XML servido por el bot).
+- **🗑** borra el agente (y recarga Asterisk).
+
+Para que el QR funcione, el móvil del agente debe poder alcanzar la URL de
+provisioning (`PROVISION_BASE_URL`, p. ej. `http://TU_IP:8090`); abre ese
+puerto en el firewall. Las credenciales también se muestran en texto por si se
+prefiere configurarlas a mano.
+
+Comprueba que un agente está registrado:
 
 ```bash
-docker compose exec asterisk asterisk -rx "pjsip show aor agente1-aor"
 docker compose exec asterisk asterisk -rx "pjsip show contacts"
 ```
 
-Para varios agentes (grupo de timbrado) se pueden añadir más endpoints; pídelo
-y se amplía. Si prefieres transferir a un número de teléfono, pon
+Si prefieres transferir a un número de teléfono en vez de a softphones, pon
 `AGENT_MODE=number` y `AGENT_NUMBER=...`.
 
 ## Red / firewall
@@ -144,8 +155,10 @@ del servidor. Abre en el firewall de la VPS:
 - **UDP 5060** (y TCP 5060 / TLS 5061) — señalización SIP: trunk **y** registro
   de los softphones de los agentes (Zoiper/PortSIP).
 - **UDP 10000–10200** — audio RTP (rango configurable en `asterisk/etc/rtp.conf`).
-- **TCP 8088** (ARI) **no** debe exponerse a internet; solo lo usa el bot en
-  `127.0.0.1`.
+- **TCP 8090** (`PROVISION_PORT`) — servidor de provisioning para el QR de
+  Zoiper (los móviles de los agentes lo consultan). Exponerlo solo si usas QR.
+- **TCP 8088** (ARI) y **TCP 5038** (AMI) **no** deben exponerse a internet;
+  solo los usa el bot en `127.0.0.1`.
 
 ## Cambiar el mensaje
 

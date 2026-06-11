@@ -23,11 +23,15 @@ from telegram.ext import (
     filters,
 )
 
+from .agentes import AgentStore
+from .ami import AMIClient
 from .ari import ARIClient
 from .config import Config, load_config
 from .dialer import Campaign, Dialer, Outcome
 from .locuciones import LocutionStore
 from .numbers import parse_numbers
+from .provisioning import ProvisioningServer
+from . import qr
 from .tts import ensure_prompt
 
 logging.basicConfig(
@@ -43,10 +47,28 @@ class BotApp:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.ari = ARIClient(cfg.ari_rest_url, cfg.ari_username, cfg.ari_password, cfg.stasis_app)
+        self.ami = AMIClient(cfg.ami_host, cfg.ami_port, cfg.ami_user, cfg.ami_password)
         self.locutions = LocutionStore(cfg.sounds_dir, cfg.tts_lang)
-        self.dialer = Dialer(self.ari, cfg, self.locutions)
+        self.agents = AgentStore(cfg.agents_store_path, cfg.agents_include_path, self.ami)
+        self.dialer = Dialer(self.ari, cfg, self.locutions, self.agents)
+        self.provisioning = ProvisioningServer(self.agents, self._sip_host(), cfg.provision_port)
         self._pending: dict[int, list[str]] = {}        # numbers awaiting confirm
         self._state: dict[int, dict] = {}               # per-chat conversational state
+
+    def _sip_host(self) -> str:
+        if self.cfg.sip_public_host:
+            return self.cfg.sip_public_host
+        # Fall back to the host in the provisioning base URL.
+        base = self.cfg.provision_base_url
+        if base:
+            return base.split("://")[-1].split(":")[0].split("/")[0]
+        return "CAMBIA_ESTA_IP"
+
+    def _prov_url(self, token: str) -> str:
+        base = self.cfg.provision_base_url
+        if not base:
+            base = f"http://{self._sip_host()}:{self.cfg.provision_port}"
+        return f"{base.rstrip('/')}/prov/{token}.xml"
 
     # ----------------------------------------------------------------- auth
     def _authorized(self, update: Update) -> bool:
@@ -68,10 +90,22 @@ class BotApp:
             [
                 [InlineKeyboardButton("📞 Llamar", callback_data="menu:call"),
                  InlineKeyboardButton("🎙 Locuciones", callback_data="menu:loc")],
-                [InlineKeyboardButton("📋 Historial", callback_data="menu:hist"),
-                 InlineKeyboardButton("⚙️ Configuración", callback_data="menu:cfg")],
+                [InlineKeyboardButton("👥 Agentes", callback_data="menu:agents"),
+                 InlineKeyboardButton("📋 Historial", callback_data="menu:hist")],
+                [InlineKeyboardButton("⚙️ Configuración", callback_data="menu:cfg")],
             ]
         )
+
+    def _agents_menu(self) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        for a in self.agents.list():
+            rows.append([
+                InlineKeyboardButton(f"👤 {a.name} ({a.sip_user})", callback_data=f"ag:qr:{a.id}"),
+                InlineKeyboardButton("🗑", callback_data=f"ag:del:{a.id}"),
+            ])
+        rows.append([InlineKeyboardButton("➕ Crear agente", callback_data="ag:new")])
+        rows.append([InlineKeyboardButton("⬅️ Menú", callback_data="menu:main")])
+        return InlineKeyboardMarkup(rows)
 
     def _loc_menu(self) -> InlineKeyboardMarkup:
         rows: list[list[InlineKeyboardButton]] = []
@@ -153,6 +187,23 @@ class BotApp:
                 "🎙 <b>Locuciones</b>\nElige cuál suena. Pulsa una para activarla.",
                 reply_markup=self._loc_menu(), parse_mode=ParseMode.HTML,
             )
+        elif data == "menu:agents":
+            await query.edit_message_text(
+                "👥 <b>Agentes</b>\nUsuarios SIP para Zoiper/PortSIP. Pulsa uno para ver su QR.",
+                reply_markup=self._agents_menu(), parse_mode=ParseMode.HTML,
+            )
+        elif data == "ag:new":
+            self._state[chat_id] = {"await": "agent_name"}
+            await query.edit_message_text(
+                "👤 Escríbeme el <b>nombre</b> del nuevo agente (ej. «Juan» o «Soporte 1»).",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Agentes", callback_data="menu:agents")]]),
+                parse_mode=ParseMode.HTML,
+            )
+        elif data.startswith("ag:del:"):
+            await self.agents.delete(data.split(":")[2])
+            await query.edit_message_text("👥 <b>Agentes</b>\nAgente eliminado.", reply_markup=self._agents_menu(), parse_mode=ParseMode.HTML)
+        elif data.startswith("ag:qr:"):
+            await self._send_agent_qr(query, context, chat_id, data.split(":")[2])
         elif data == "menu:hist":
             await query.edit_message_text(self._render_history(), reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Menú", callback_data="menu:main")]]), parse_mode=ParseMode.HTML)
@@ -201,6 +252,14 @@ class BotApp:
         message = update.effective_message
         chat_id = update.effective_chat.id
         state = self._state.get(chat_id)
+
+        # Awaiting a new agent name.
+        if state and state.get("await") == "agent_name":
+            self._state.pop(chat_id, None)
+            await message.reply_text("⏳ Creando agente y recargando Asterisk…")
+            agent = await self.agents.create(message.text.strip())
+            await self._deliver_agent(context, chat_id, agent.id, created=True)
+            return
 
         # Awaiting locution text -> create a TTS locution.
         if state and state.get("await") == "loc_text":
@@ -302,6 +361,30 @@ class BotApp:
             reply_markup=self._loc_menu(),
         )
 
+    # ----------------------------------------------------------------- agents / QR
+    async def _send_agent_qr(self, query, context, chat_id: int, agent_id: str) -> None:
+        await query.answer()
+        await self._deliver_agent(context, chat_id, agent_id, created=False)
+
+    async def _deliver_agent(self, context, chat_id: int, agent_id: str, created: bool) -> None:
+        agent = self.agents.get(agent_id)
+        if not agent:
+            await context.bot.send_message(chat_id, "Ese agente ya no existe.")
+            return
+        url = self._prov_url(agent.token)
+        caption = (
+            (f"✅ Agente «{html.escape(agent.name)}» creado.\n\n" if created else
+             f"👤 Agente «{html.escape(agent.name)}»\n\n")
+            + "<b>Credenciales SIP</b> (Zoiper/PortSIP):\n"
+            f"• Servidor: <code>{html.escape(self._sip_host())}</code>\n"
+            f"• Usuario: <code>{html.escape(agent.sip_user)}</code>\n"
+            f"• Contraseña: <code>{html.escape(agent.sip_password)}</code>\n"
+            "• Transporte: UDP\n\n"
+            "📲 O escanea el QR en Zoiper («Iniciar sesión con QR»):"
+        )
+        png = qr.make_png(url)
+        await context.bot.send_photo(chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML)
+
     # ----------------------------------------------------------------- campaign launch
     async def _launch(self, query, context, chat_id: int) -> None:
         numbers = self._pending.pop(chat_id, None)
@@ -385,6 +468,7 @@ class BotApp:
             f"• Trunk SIP: <code>{html.escape(c.sip_endpoint)}</code>\n"
             f"• Caller ID: <code>{html.escape(c.caller_id)}</code>\n"
             f"• Transferencia a: <code>{html.escape(c.agent_display)}</code>\n"
+            f"• Agentes registrables: <code>{len(self.agents.list())}</code>\n"
             f"• Llamadas simultáneas: <code>{c.max_concurrent_calls}</code>\n"
             f"• Timeout llamada: <code>{c.call_timeout}s</code>"
         )
@@ -412,6 +496,10 @@ class BotApp:
         logger.info("Preparing default TTS prompt…")
         await ensure_prompt(self.cfg.message_text, self.cfg.tts_lang, self.cfg.sounds_dir, self.cfg.sound_name)
         await self.locutions.register_default(self.cfg.sound_name)
+        if self.cfg.agent_mode == "sip":
+            await self.agents.ensure_seed(self.cfg.seed_agent_user, self.cfg.seed_agent_password)
+        logger.info("Starting provisioning server…")
+        await self.provisioning.start()
         logger.info("Connecting to ARI at %s…", self.cfg.ari_rest_url)
         await self.ari.connect(self.dialer.handle_event)
         await self.ari.wait_until_ready()
@@ -419,6 +507,7 @@ class BotApp:
 
     async def _post_shutdown(self, app: Application) -> None:
         await self.ari.close()
+        await self.provisioning.stop()
 
 
 def main() -> None:

@@ -72,10 +72,12 @@ class CallRecord:
     outcome: Outcome | None = None
     channel_id: str | None = None
     agent_channel_id: str | None = None
+    agent_channels: list[str] = field(default_factory=list)
     bridge_id: str | None = None
     playback_id: str | None = None
     agent_playback_id: str | None = None
     answered: bool = False
+    agent_answered: bool = False
     transferred: bool = False
     finished: bool = False
     started_at: float = 0.0
@@ -122,10 +124,11 @@ class Campaign:
 
 
 class Dialer:
-    def __init__(self, ari: ARIClient, cfg: Config, locutions: LocutionStore):
+    def __init__(self, ari: ARIClient, cfg: Config, locutions: LocutionStore, agents=None):
         self.ari = ari
         self.cfg = cfg
         self.locutions = locutions
+        self.agents = agents
         self._sem = asyncio.Semaphore(cfg.max_concurrent_calls)
         self._channels: dict[str, tuple[Campaign, CallRecord, str]] = {}
         self.active: Campaign | None = None
@@ -214,8 +217,8 @@ class Dialer:
                 record.finished = True
             finally:
                 self._channels.pop(channel_id, None)
-                if record.agent_channel_id:
-                    self._channels.pop(record.agent_channel_id, None)
+                for ach in list(record.agent_channels):
+                    self._channels.pop(ach, None)
                 campaign.notify()
 
     # ----------------------------------------------------------------- event handling
@@ -247,7 +250,7 @@ class Dialer:
 
         campaign, record, kind = entry
         if kind == "agent":
-            await self._on_agent_answered(campaign, record)
+            await self._on_agent_answered(campaign, record, channel_id)
             return
 
         # Customer answered the call.
@@ -325,6 +328,16 @@ class Dialer:
                 await self._bridge_agent(campaign, record)
                 return
 
+    def _agent_endpoints(self) -> list[str]:
+        if self.cfg.agent_mode == "number":
+            return [self.cfg.agent_dial]
+        eps: list[str] = []
+        if self.agents is not None:
+            eps = self.agents.endpoints()
+        if not eps and self.cfg.agent_endpoint:
+            eps = [f"PJSIP/{self.cfg.agent_endpoint}"]
+        return eps
+
     async def _transfer(self, campaign: Campaign, record: CallRecord) -> None:
         async with record._transfer_lock:
             if record.transferred or record.finished:
@@ -337,33 +350,67 @@ class Dialer:
         if record.playback_id:
             await self.ari.stop_playback(record.playback_id)
 
+        endpoints = self._agent_endpoints()
+        if not endpoints:
+            logger.warning("No agents available to transfer %s", record.number)
+            record.outcome = Outcome.TRANSFER_FAILED
+            await self.ari.hangup(record.channel_id)
+            campaign.notify()
+            return
+
         bridge_id = f"br-{record.channel_id}"
         record.bridge_id = bridge_id
-        agent_channel_id = f"agent-{record.channel_id}"
-        record.agent_channel_id = agent_channel_id
-        self._channels[agent_channel_id] = (campaign, record, "agent")
-
-        endpoint = self.cfg.agent_dial
         try:
             await self.ari.create_bridge(bridge_id)
             await self.ari.add_to_bridge(bridge_id, record.channel_id)
-            await self.ari.originate(
-                endpoint=endpoint,
-                channel_id=agent_channel_id,
-                caller_id=record.number.lstrip("+"),
-                timeout=self.cfg.call_timeout,
-                app_args=f"agent,{campaign.id}",
-            )
         except ARIError as exc:
-            logger.warning("Transfer failed for %s: %s", record.number, exc)
+            logger.warning("Bridge setup failed for %s: %s", record.number, exc)
             record.outcome = Outcome.TRANSFER_FAILED
-            self._channels.pop(agent_channel_id, None)
+            await self.ari.hangup(record.channel_id)
+            campaign.notify()
+            return
+
+        # Ring all agents at once; the first to answer wins.
+        launched = 0
+        for i, endpoint in enumerate(endpoints):
+            agent_channel_id = f"agent-{record.channel_id}-{i}"
+            record.agent_channels.append(agent_channel_id)
+            self._channels[agent_channel_id] = (campaign, record, "agent")
+            try:
+                await self.ari.originate(
+                    endpoint=endpoint,
+                    channel_id=agent_channel_id,
+                    caller_id=record.number.lstrip("+"),
+                    timeout=self.cfg.call_timeout,
+                    app_args=f"agent,{campaign.id}",
+                )
+                launched += 1
+            except ARIError as exc:
+                logger.warning("Could not ring %s: %s", endpoint, exc)
+                self._channels.pop(agent_channel_id, None)
+                record.agent_channels.remove(agent_channel_id)
+
+        if launched == 0:
+            record.outcome = Outcome.TRANSFER_FAILED
             await self.ari.hangup(record.channel_id)
             campaign.notify()
 
-    async def _on_agent_answered(self, campaign: Campaign, record: CallRecord) -> None:
+    async def _on_agent_answered(self, campaign: Campaign, record: CallRecord, channel_id: str) -> None:
         if record.finished or not record.bridge_id:
+            await self.ari.hangup(channel_id)
             return
+        if record.agent_answered:
+            # Another agent already took the call; drop this extra leg.
+            await self.ari.hangup(channel_id)
+            return
+        record.agent_answered = True
+        record.agent_channel_id = channel_id
+        # Cancel the other ringing agent legs.
+        for ach in list(record.agent_channels):
+            if ach != channel_id:
+                await self.ari.hangup(ach)
+                self._channels.pop(ach, None)
+
         # Optional identification message played privately to the agent before
         # the customer is connected ("te paso una llamada de verificación…").
         agent_media = self.locutions.active_media("agente")
@@ -371,7 +418,7 @@ class Dialer:
             playback_id = f"agpb-{record.channel_id}"
             record.agent_playback_id = playback_id
             try:
-                await self.ari.play(record.agent_channel_id, agent_media, playback_id)
+                await self.ari.play(channel_id, agent_media, playback_id)
                 return  # bridging happens on PlaybackFinished
             except ARIError as exc:
                 logger.warning("Agent greeting failed for %s: %s", record.number, exc)
@@ -398,9 +445,11 @@ class Dialer:
         cause = event.get("cause")
 
         if kind == "agent":
-            # Agent leg gone: drop the customer too if still connected.
             self._channels.pop(channel_id, None)
-            if not record.finished and record.channel_id:
+            if channel_id in record.agent_channels:
+                record.agent_channels.remove(channel_id)
+            # Only dropping the *connected* agent should hang up the customer.
+            if record.agent_channel_id == channel_id and not record.finished and record.channel_id:
                 await self.ari.hangup(record.channel_id)
             return
 
@@ -415,7 +464,10 @@ class Dialer:
         if record.outcome is None:
             record.outcome = Outcome.NO_INPUT if record.answered else _outcome_from_cause(cause)
 
-        # Tear down any transfer infrastructure.
+        # Tear down any transfer infrastructure (winning + still-ringing legs).
+        for ach in list(record.agent_channels):
+            await self.ari.hangup(ach)
+            self._channels.pop(ach, None)
         if record.agent_channel_id:
             await self.ari.hangup(record.agent_channel_id)
         if record.bridge_id:

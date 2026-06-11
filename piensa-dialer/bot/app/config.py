@@ -87,6 +87,23 @@ class Config:
     sounds_dir: str = field(default_factory=lambda: _get("SOUNDS_DIR", "/sounds"))
     sound_name: str = field(default_factory=lambda: _get("SOUND_NAME", "piensa-aviso"))
 
+    # AMI (to reload PJSIP after editing agents)
+    ami_host: str = field(default_factory=lambda: _get("AMI_HOST", "127.0.0.1"))
+    ami_port: int = field(default_factory=lambda: _get_int("AMI_PORT", 5038))
+    ami_user: str = field(default_factory=lambda: _get("AMI_USER", "piensa"))
+    ami_password: str = field(default_factory=lambda: _get("AMI_PASSWORD", "change-me-ami"))
+
+    # Dynamic agents (SIP users) + Zoiper QR provisioning
+    agents_store_path: str = field(default_factory=lambda: _get("AGENTS_STORE_PATH", "/sounds/agents.json"))
+    agents_include_path: str = field(default_factory=lambda: _get("AGENTS_INCLUDE_PATH", "/agents/agents.conf"))
+    # Public base URL the agents' phones can reach for QR provisioning.
+    provision_base_url: str = field(default_factory=lambda: _get("PROVISION_BASE_URL", ""))
+    provision_port: int = field(default_factory=lambda: _get_int("PROVISION_PORT", 8090))
+    # SIP domain/host written into the provisioning profile (the server's public IP/host).
+    sip_public_host: str = field(default_factory=lambda: _get("SIP_PUBLIC_HOST", ""))
+    seed_agent_user: str = field(default_factory=lambda: _get("AGENT_SIP_USER", "agente1"))
+    seed_agent_password: str = field(default_factory=lambda: _get("AGENT_SIP_PASSWORD", ""))
+
     @property
     def ari_rest_url(self) -> str:
         return self.ari_base_url.rstrip("/") + "/ari"

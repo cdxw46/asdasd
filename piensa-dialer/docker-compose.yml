@@ -14,9 +14,13 @@ services:
       ARI_PASSWORD: ${ARI_PASSWORD}
       AGENT_SIP_USER: ${AGENT_SIP_USER:-agente1}
       AGENT_SIP_PASSWORD: ${AGENT_SIP_PASSWORD}
+      AMI_USER: ${AMI_USER:-piensa}
+      AMI_PASSWORD: ${AMI_PASSWORD}
     volumes:
       # Asterisk (Debian) resolves sound:custom/<name> from its data dir.
       - sounds:/usr/share/asterisk/sounds/en/custom
+      # Dynamic agents include written by the bot.
+      - agents:/etc/asterisk/agents
 
   bot:
     build: ./bot
@@ -48,8 +52,21 @@ services:
       # reads them from /usr/share/asterisk/sounds/en/custom.
       SOUNDS_DIR: /sounds
       SOUND_NAME: ${SOUND_NAME:-piensa-aviso}
+      # AMI (to reload PJSIP after creating/deleting agents)
+      AMI_HOST: ${AMI_HOST:-127.0.0.1}
+      AMI_PORT: ${AMI_PORT:-5038}
+      AMI_USER: ${AMI_USER:-piensa}
+      AMI_PASSWORD: ${AMI_PASSWORD}
+      # Dynamic agents + Zoiper QR provisioning
+      AGENTS_STORE_PATH: /sounds/agents.json
+      AGENTS_INCLUDE_PATH: /etc/asterisk/agents/agents.conf
+      PROVISION_BASE_URL: ${PROVISION_BASE_URL:-}
+      PROVISION_PORT: ${PROVISION_PORT:-8090}
+      SIP_PUBLIC_HOST: ${SIP_PUBLIC_HOST:-}
     volumes:
       - sounds:/sounds
+      - agents:/etc/asterisk/agents
 
 volumes:
   sounds:
+  agents:

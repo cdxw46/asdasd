@@ -343,7 +343,7 @@ class Dialer:
         record.agent_channel_id = agent_channel_id
         self._channels[agent_channel_id] = (campaign, record, "agent")
 
-        endpoint = f"PJSIP/{dial_string(self.cfg.agent_number)}@{self.cfg.sip_endpoint}"
+        endpoint = self.cfg.agent_dial
         try:
             await self.ari.create_bridge(bridge_id)
             await self.ari.add_to_bridge(bridge_id, record.channel_id)

@@ -12,6 +12,8 @@ services:
       SIP_EXTERNAL_IP: ${SIP_EXTERNAL_IP:-}
       ARI_USERNAME: ${ARI_USERNAME}
       ARI_PASSWORD: ${ARI_PASSWORD}
+      AGENT_SIP_USER: ${AGENT_SIP_USER:-agente1}
+      AGENT_SIP_PASSWORD: ${AGENT_SIP_PASSWORD}
     volumes:
       # Asterisk (Debian) resolves sound:custom/<name> from its data dir.
       - sounds:/usr/share/asterisk/sounds/en/custom
@@ -32,7 +34,9 @@ services:
       ARI_APP: ${ARI_APP:-outbound}
       SIP_ENDPOINT: ${SIP_ENDPOINT:-narayana-endpoint}
       CALLER_ID: ${CALLER_ID}
-      AGENT_NUMBER: ${AGENT_NUMBER}
+      AGENT_MODE: ${AGENT_MODE:-sip}
+      AGENT_ENDPOINT: ${AGENT_ENDPOINT:-agente1}
+      AGENT_NUMBER: ${AGENT_NUMBER:-}
       MAX_CONCURRENT_CALLS: ${MAX_CONCURRENT_CALLS:-5}
       CALL_TIMEOUT: ${CALL_TIMEOUT:-30}
       IVR_MAX_REPEATS: ${IVR_MAX_REPEATS:-2}

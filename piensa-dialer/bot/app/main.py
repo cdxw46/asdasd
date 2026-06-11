@@ -99,7 +99,7 @@ class BotApp:
             "🟢 <b>P1 Call Center</b>\n\n"
             f"🎙 Locución cliente: <b>{html.escape(cli.name) if cli else '—'}</b>\n"
             f"🔁 Locución agente: <b>{html.escape(ag.name) if ag else '—'}</b>\n"
-            f"📞 Transferencia a: <code>{html.escape(self.cfg.agent_number)}</code>\n\n"
+            f"📞 Transferencia a: <code>{html.escape(self.cfg.agent_display)}</code>\n\n"
             "Pégame números para llamar, o usa los botones."
         )
 
@@ -384,7 +384,7 @@ class BotApp:
             "⚙️ <b>Configuración</b>\n"
             f"• Trunk SIP: <code>{html.escape(c.sip_endpoint)}</code>\n"
             f"• Caller ID: <code>{html.escape(c.caller_id)}</code>\n"
-            f"• Transferencia a: <code>{html.escape(c.agent_number)}</code>\n"
+            f"• Transferencia a: <code>{html.escape(c.agent_display)}</code>\n"
             f"• Llamadas simultáneas: <code>{c.max_concurrent_calls}</code>\n"
             f"• Timeout llamada: <code>{c.call_timeout}s</code>"
         )

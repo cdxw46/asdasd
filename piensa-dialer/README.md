@@ -23,6 +23,10 @@ Telegram  ──►  Bot (Python)  ──ARI──►  Asterisk  ──SIP──
 - **Locución de agente**: al transferir, antes de unir la llamada se reproduce
   un audio de identificación al agente ("te paso una verificación…").
 - Captura del DTMF: al pulsar **1** se hace puente con el agente.
+- **Agente = softphone SIP** (Zoiper/PortSIP): no se transfiere a un número de
+  teléfono, sino a una extensión SIP que el agente registra en su softphone
+  (sin coste de minutos de transferencia). También se soporta transferir a un
+  número PSTN si se prefiere (`AGENT_MODE=number`).
 - Mensaje de estado en vivo + informe final (contestó / pulsó 1 / no contesta /
   comunica / fallida…) e historial de campañas.
 - Lista blanca opcional de usuarios de Telegram.
@@ -109,12 +113,36 @@ docker compose exec asterisk asterisk -rx "pjsip show endpoints"
 6. Abre Telegram, habla con tu bot, `/start`, pega una lista de números y pulsa
    **📞 Llamar**.
 
+## Agente con Zoiper / PortSIP
+
+Por defecto (`AGENT_MODE=sip`) al pulsar **1** la llamada va a un **softphone
+SIP** que el agente registra en su móvil/PC. Configura en Zoiper/PortSIP:
+
+| Campo        | Valor                                    |
+|--------------|------------------------------------------|
+| Dominio/Host | `IP pública de tu servidor`              |
+| Usuario      | `AGENT_SIP_USER` (por defecto `agente1`) |
+| Contraseña   | `AGENT_SIP_PASSWORD` (la de tu `.env`)   |
+| Transporte   | UDP (o TCP/TLS)                          |
+
+Comprueba que el agente está registrado:
+
+```bash
+docker compose exec asterisk asterisk -rx "pjsip show aor agente1-aor"
+docker compose exec asterisk asterisk -rx "pjsip show contacts"
+```
+
+Para varios agentes (grupo de timbrado) se pueden añadir más endpoints; pídelo
+y se amplía. Si prefieres transferir a un número de teléfono, pon
+`AGENT_MODE=number` y `AGENT_NUMBER=...`.
+
 ## Red / firewall
 
 Asterisk corre en modo `network_mode: host` para que SIP y RTP usen la IP real
 del servidor. Abre en el firewall de la VPS:
 
-- **UDP 5060** — señalización SIP.
+- **UDP 5060** (y TCP 5060 / TLS 5061) — señalización SIP: trunk **y** registro
+  de los softphones de los agentes (Zoiper/PortSIP).
 - **UDP 10000–10200** — audio RTP (rango configurable en `asterisk/etc/rtp.conf`).
 - **TCP 8088** (ARI) **no** debe exponerse a internet; solo lo usa el bot en
   `127.0.0.1`.

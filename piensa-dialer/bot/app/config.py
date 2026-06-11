@@ -66,7 +66,12 @@ class Config:
     # Trunk / dialing
     sip_endpoint: str = field(default_factory=lambda: _get("SIP_ENDPOINT", "narayana-endpoint"))
     caller_id: str = field(default_factory=lambda: _get("CALLER_ID", "34680540787"))
-    agent_number: str = field(default_factory=lambda: _get("AGENT_NUMBER", required=True))
+    # Where pressing "1" is sent:
+    #   "sip"    -> a SIP softphone (Zoiper/PortSIP) registered as AGENT_ENDPOINT
+    #   "number" -> an external PSTN number (AGENT_NUMBER) via the trunk
+    agent_mode: str = field(default_factory=lambda: _get("AGENT_MODE", "sip").lower())
+    agent_endpoint: str = field(default_factory=lambda: _get("AGENT_ENDPOINT", "agente1"))
+    agent_number: str = field(default_factory=lambda: _get("AGENT_NUMBER", ""))
 
     # Campaign behaviour
     max_concurrent_calls: int = field(default_factory=lambda: _get_int("MAX_CONCURRENT_CALLS", 5))
@@ -85,6 +90,21 @@ class Config:
     @property
     def ari_rest_url(self) -> str:
         return self.ari_base_url.rstrip("/") + "/ari"
+
+    @property
+    def agent_dial(self) -> str:
+        """Asterisk endpoint string used to reach the agent on transfer."""
+        if self.agent_mode == "number":
+            num = self.agent_number.lstrip("+")
+            return f"PJSIP/{num}@{self.sip_endpoint}"
+        # SIP softphone: dial all registered contacts of the agent endpoint.
+        return f"PJSIP/{self.agent_endpoint}"
+
+    @property
+    def agent_display(self) -> str:
+        if self.agent_mode == "number":
+            return self.agent_number or "(sin número)"
+        return f"softphone SIP «{self.agent_endpoint}»"
 
     @property
     def sound_media(self) -> str:

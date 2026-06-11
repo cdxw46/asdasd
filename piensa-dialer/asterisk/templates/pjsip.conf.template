@@ -70,3 +70,40 @@ rewrite_contact = yes
 type = identify
 endpoint = narayana-endpoint
 match = ${SIP_SERVER}
+
+;------------------------------------------------------------------------
+; Agent softphone (Zoiper / PortSIP).
+; The agent registers a SIP account to this server:
+;   Server/Domain : <IP pública del servidor>
+;   Username      : ${AGENT_SIP_USER}
+;   Password      : ${AGENT_SIP_PASSWORD}
+;   Transport     : UDP (o TCP/TLS)
+; When the callee presses 1, the dialer originates PJSIP/${AGENT_SIP_USER}
+; which rings every contact registered for this endpoint.
+;------------------------------------------------------------------------
+[${AGENT_SIP_USER}]
+type = endpoint
+transport = transport-udp
+context = from-agents
+disallow = all
+allow = alaw,ulaw,g722,opus
+auth = ${AGENT_SIP_USER}-auth
+aors = ${AGENT_SIP_USER}
+direct_media = no
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+
+[${AGENT_SIP_USER}-auth]
+type = auth
+auth_type = userpass
+username = ${AGENT_SIP_USER}
+password = ${AGENT_SIP_PASSWORD}
+
+; The AOR must be named exactly like the registering user so the PJSIP
+; registrar can find it from the REGISTER's To header.
+[${AGENT_SIP_USER}]
+type = aor
+max_contacts = 3
+remove_existing = yes
+qualify_frequency = 30

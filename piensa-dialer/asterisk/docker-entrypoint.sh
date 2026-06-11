@@ -6,7 +6,7 @@ set -euo pipefail
 # eat Asterisk's own ${...} dialplan variables.
 render() {
     local src="$1" dst="$2"
-    envsubst '${SIP_SERVER} ${SIP_LOGIN} ${SIP_PASSWORD} ${CALLER_ID} ${SIP_EXTERNAL_IP} ${ARI_USERNAME} ${ARI_PASSWORD}' \
+    envsubst '${SIP_SERVER} ${SIP_LOGIN} ${SIP_PASSWORD} ${CALLER_ID} ${SIP_EXTERNAL_IP} ${ARI_USERNAME} ${ARI_PASSWORD} ${AGENT_SIP_USER} ${AGENT_SIP_PASSWORD}' \
         < "$src" > "$dst"
     echo "rendered $dst"
 }
@@ -18,6 +18,8 @@ render() {
 : "${ARI_USERNAME:?ARI_USERNAME is required}"
 : "${ARI_PASSWORD:?ARI_PASSWORD is required}"
 export SIP_EXTERNAL_IP="${SIP_EXTERNAL_IP:-}"
+export AGENT_SIP_USER="${AGENT_SIP_USER:-agente1}"
+export AGENT_SIP_PASSWORD="${AGENT_SIP_PASSWORD:?AGENT_SIP_PASSWORD is required}"
 
 render /etc/asterisk/templates/pjsip.conf.template /etc/asterisk/pjsip.conf
 render /etc/asterisk/templates/ari.conf.template   /etc/asterisk/ari.conf

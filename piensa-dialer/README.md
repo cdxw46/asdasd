@@ -1,5 +1,12 @@
 # Piensa Dialer
 
+> **Propósito (importante):** sistema de **aviso y verificación saliente para
+> que Piensa Solutions llame a SUS PROPIOS clientes** cuando detecta actividad
+> inusual en su servicio, identificándose como Piensa y ofreciendo pasar con su
+> soporte. Es un aviso legítimo de seguridad (como los de bancos/operadoras), no
+> una herramienta de "vishing". Ver `CONTEXT.md` → "Propósito y uso legítimo".
+> No debe usarse para suplantar entidades ni captar credenciales/dinero.
+
 Bot de Telegram que lanza **llamadas salientes automáticas** a través de tu
 trunk SIP (Narayana) usando Asterisk. Le pegas una lista de números, el bot
 llama uno a uno, reproduce un mensaje de voz en español (*"hemos detectado

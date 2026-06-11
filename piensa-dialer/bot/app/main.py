@@ -375,18 +375,21 @@ class BotApp:
             await context.bot.send_message(chat_id, "Ese agente ya no existe.")
             return
         url = self._linphone_url(agent.token)
+        host = self._sip_host()
         caption = (
             (f"✅ Agente «{html.escape(agent.name)}» creado.\n\n" if created else
              f"👤 Agente «{html.escape(agent.name)}»\n\n")
-            + "<b>Datos SIP</b> (Zoiper / PortSIP — configúralos a mano):\n"
-            f"• Servidor / Dominio: <code>{html.escape(self._sip_host())}</code>\n"
-            f"• Usuario: <code>{html.escape(agent.sip_user)}</code>\n"
-            f"• Contraseña: <code>{html.escape(agent.sip_password)}</code>\n"
-            "• Transporte: UDP\n\n"
-            "📲 <b>QR para Linphone</b> (app gratuita): ábrela → «Scan QR Code» "
-            "y se configura solo.\n"
-            "<i>Nota: el QR nativo de Zoiper es solo para su plataforma OEM; "
-            "en Zoiper/PortSIP usa los datos de arriba.</i>"
+            + "<b>📱 PortSIP</b> — añade una cuenta SIP con estos datos:\n"
+            f"• SIP Server / Dominio: <code>{html.escape(host)}</code>\n"
+            f"• Username: <code>{html.escape(agent.sip_user)}</code>\n"
+            f"• Auth name: <code>{html.escape(agent.sip_user)}</code>\n"
+            f"• Password: <code>{html.escape(agent.sip_password)}</code>\n"
+            f"• Outbound proxy: <code>{html.escape(host)}:5060</code>\n"
+            "• Transport: UDP\n\n"
+            "<i>El «Scan QR» de PortSIP solo vale para un PortSIP PBX; con "
+            "Asterisk se mete a mano (30 s).</i>\n\n"
+            "📲 Si prefieres QR de un toque, usa <b>Linphone</b> (gratis) → "
+            "«Scan QR Code» con el código de abajo."
         )
         png = qr.make_png(url)
         await context.bot.send_photo(chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML)

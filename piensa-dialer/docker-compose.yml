@@ -1,0 +1,48 @@
+services:
+  asterisk:
+    build: ./asterisk
+    container_name: piensa-asterisk
+    restart: unless-stopped
+    network_mode: host          # required so SIP/RTP use the host's real IP
+    environment:
+      SIP_SERVER: ${SIP_SERVER}
+      SIP_LOGIN: ${SIP_LOGIN}
+      SIP_PASSWORD: ${SIP_PASSWORD}
+      CALLER_ID: ${CALLER_ID}
+      SIP_EXTERNAL_IP: ${SIP_EXTERNAL_IP:-}
+      ARI_USERNAME: ${ARI_USERNAME}
+      ARI_PASSWORD: ${ARI_PASSWORD}
+    volumes:
+      - sounds:/var/lib/asterisk/sounds/custom
+
+  bot:
+    build: ./bot
+    container_name: piensa-bot
+    restart: unless-stopped
+    network_mode: host          # talks to ARI on 127.0.0.1:8088
+    depends_on:
+      - asterisk
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS:-}
+      ARI_BASE_URL: ${ARI_BASE_URL:-http://127.0.0.1:8088}
+      ARI_USERNAME: ${ARI_USERNAME}
+      ARI_PASSWORD: ${ARI_PASSWORD}
+      ARI_APP: ${ARI_APP:-outbound}
+      SIP_ENDPOINT: ${SIP_ENDPOINT:-narayana-endpoint}
+      CALLER_ID: ${CALLER_ID}
+      AGENT_NUMBER: ${AGENT_NUMBER}
+      MAX_CONCURRENT_CALLS: ${MAX_CONCURRENT_CALLS:-5}
+      CALL_TIMEOUT: ${CALL_TIMEOUT:-30}
+      IVR_MAX_REPEATS: ${IVR_MAX_REPEATS:-2}
+      IVR_INPUT_TIMEOUT: ${IVR_INPUT_TIMEOUT:-8}
+      DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE:-34}
+      MESSAGE_TEXT: ${MESSAGE_TEXT:-}
+      TTS_LANG: ${TTS_LANG:-es}
+      SOUNDS_DIR: /sounds
+      SOUND_NAME: ${SOUND_NAME:-piensa-aviso}
+    volumes:
+      - sounds:/sounds
+
+volumes:
+  sounds:

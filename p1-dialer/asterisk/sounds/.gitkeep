@@ -1,0 +1,7 @@
+# Aqui se generan/colocan los audios del IVR:
+#   prompt.wav        -> mensaje principal ("...pulse 1...")
+#   transferring.wav  -> "le paso con un agente"
+#
+# Puedes sustituirlos por tus propias grabaciones.
+# Formato recomendado: WAV PCM 16-bit, 8000 Hz, mono.
+# Conversion: sox tu_audio.mp3 -r 8000 -c 1 -b 16 prompt.wav

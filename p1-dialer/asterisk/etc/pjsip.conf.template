@@ -1,0 +1,59 @@
+; ============================================================
+;  PJSIP - Trunk hacia Narayana (rdx.narayana.im)
+;  Este fichero se genera desde pjsip.conf.template en el arranque.
+; ============================================================
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+
+; ---------- Registro en el proveedor ----------
+[narayana-reg]
+type=registration
+transport=transport-udp
+outbound_auth=narayana-auth
+server_uri=sip:${SIP_SERVER}
+client_uri=sip:${SIP_USERNAME}@${SIP_SERVER}
+contact_user=${SIP_USERNAME}
+retry_interval=60
+forbidden_retry_interval=300
+expiration=600
+line=yes
+endpoint=narayana
+
+; ---------- Autenticacion ----------
+[narayana-auth]
+type=auth
+auth_type=userpass
+username=${SIP_USERNAME}
+password=${SIP_PASSWORD}
+
+; ---------- AOR (donde esta el proveedor) ----------
+[narayana-aor]
+type=aor
+contact=sip:${SIP_SERVER}
+qualify_frequency=60
+
+; ---------- Endpoint (trunk) ----------
+[narayana]
+type=endpoint
+transport=transport-udp
+context=from-narayana
+disallow=all
+${ALLOW_LINES}
+outbound_auth=narayana-auth
+aors=narayana-aor
+from_user=${SIP_USERNAME}
+from_domain=${SIP_SERVER}
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+${PJSIP_MEDIA_ENC}
+
+; ---------- Identificar llamadas entrantes del proveedor ----------
+[narayana-identify]
+type=identify
+endpoint=narayana
+match=${SIP_SERVER}

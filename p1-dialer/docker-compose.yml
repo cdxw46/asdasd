@@ -1,0 +1,33 @@
+services:
+  asterisk:
+    build: ./asterisk
+    container_name: p1-asterisk
+    # network_mode host es lo mas fiable para SIP/RTP (evita problemas de NAT
+    # con los rangos de puertos RTP). Requiere Linux en el host.
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./asterisk/sounds:/var/lib/asterisk/sounds/custom
+      - asterisk-logs:/var/log/asterisk
+    # Si tu host NO es Linux o prefieres red bridge, comenta network_mode: host
+    # y descomenta lo siguiente (ajusta el rango RTP en rtp.conf si hace falta):
+    # ports:
+    #   - "5038:5038"      # AMI (solo interno)
+    #   - "5060:5060/udp"  # SIP
+    #   - "10000-10200:10000-10200/udp"  # RTP
+
+  bot:
+    build: ./bot
+    container_name: p1-bot
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - asterisk
+    # Con asterisk en network_mode host, el bot llega al AMI por localhost.
+    network_mode: host
+    volumes:
+      - ./bot/data:/app/data
+
+volumes:
+  asterisk-logs:

@@ -1,0 +1,54 @@
+; ============================================================
+;  Dialplan - IVR de salida "pulse 1" + transferencia
+;  Generado desde extensions.conf.template en el arranque.
+; ============================================================
+
+[general]
+static=yes
+writeprotect=no
+
+[globals]
+TRANSFER_NUMBER=${TRANSFER_NUMBER}
+DTMF_TIMEOUT=${DTMF_TIMEOUT}
+DIAL_TIMEOUT=${DIAL_TIMEOUT}
+CALLER_ID=${CALLER_ID}
+
+; ------------------------------------------------------------
+; Contexto usado por el bot al originar la llamada (via AMI).
+; El bot llama con: Channel = PJSIP/<numero>@narayana
+;                   Context = ivr-outbound, Exten = s
+; y pasa las variables CAMPAIGN y TARGET.
+; ------------------------------------------------------------
+[ivr-outbound]
+exten => s,1,NoOp(P1 campana=${CAMPAIGN} destino=${TARGET})
+ same => n,Set(CALLERID(num)=${CALLER_ID})
+ same => n,Answer()
+ same => n,UserEvent(CallResult,Campaign: ${CAMPAIGN},Target: ${TARGET},Result: ANSWERED)
+ same => n,Wait(1)
+ same => n,Set(TIMEOUT(digit)=5)
+ same => n,Background(custom/prompt)
+ same => n,WaitExten(${DTMF_TIMEOUT})
+ same => n,UserEvent(CallResult,Campaign: ${CAMPAIGN},Target: ${TARGET},Result: NO_INPUT)
+ same => n,Hangup()
+
+; El usuario pulsa 1 -> transferir
+exten => 1,1,NoOp(Pulsado 1 -> transferir campana=${CAMPAIGN} destino=${TARGET})
+ same => n,UserEvent(CallResult,Campaign: ${CAMPAIGN},Target: ${TARGET},Result: PRESSED1)
+ same => n,Playback(custom/transferring)
+ same => n,Dial(PJSIP/${TRANSFER_NUMBER}@narayana,${DIAL_TIMEOUT})
+ same => n,UserEvent(CallResult,Campaign: ${CAMPAIGN},Target: ${TARGET},Result: TRANSFER_END,DialStatus: ${DIALSTATUS})
+ same => n,Hangup()
+
+; Entrada invalida / timeout
+exten => i,1,UserEvent(CallResult,Campaign: ${CAMPAIGN},Target: ${TARGET},Result: INVALID)
+ same => n,Hangup()
+exten => t,1,UserEvent(CallResult,Campaign: ${CAMPAIGN},Target: ${TARGET},Result: NO_INPUT)
+ same => n,Hangup()
+
+; ------------------------------------------------------------
+; Llamadas entrantes del proveedor (no usado en outbound, pero
+; definido para no rechazar nada inesperado de forma fea).
+; ------------------------------------------------------------
+[from-narayana]
+exten => _.,1,NoOp(Entrante desde Narayana: ${EXTEN})
+ same => n,Hangup()

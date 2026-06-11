@@ -1,0 +1,17 @@
+; ============================================================
+;  AMI - Interfaz que usa el bot para originar llamadas
+;  y recibir eventos. Generado desde plantilla en el arranque.
+; ============================================================
+
+[general]
+enabled = yes
+port = 5038
+; Solo escuchamos en localhost: el bot corre en el mismo host (network_mode host)
+bindaddr = 127.0.0.1
+
+[${AMI_USER}]
+secret = ${AMI_SECRET}
+deny = 0.0.0.0/0.0.0.0
+permit = 127.0.0.1/255.255.255.255
+read = system,call,user,dtmf,verbose
+write = system,call,originate,reporting

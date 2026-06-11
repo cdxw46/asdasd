@@ -1,0 +1,25 @@
+# Secrets y entorno
+.env
+*.env
+!.env.example
+
+# Audios generados / propios (regenerables o sensibles)
+asterisk/sounds/*.wav
+asterisk/sounds/*.gsm
+asterisk/sounds/*.sln
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs y datos
+*.log
+data/
+bot/data/
+
+# Configs renderizadas en runtime
+asterisk/etc/pjsip.conf
+asterisk/etc/extensions.conf
+asterisk/etc/manager.conf

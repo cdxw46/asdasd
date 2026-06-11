@@ -13,7 +13,8 @@ services:
       ARI_USERNAME: ${ARI_USERNAME}
       ARI_PASSWORD: ${ARI_PASSWORD}
     volumes:
-      - sounds:/var/lib/asterisk/sounds/custom
+      # Asterisk (Debian) resolves sound:custom/<name> from its data dir.
+      - sounds:/usr/share/asterisk/sounds/en/custom
 
   bot:
     build: ./bot
@@ -39,6 +40,8 @@ services:
       DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE:-34}
       MESSAGE_TEXT: ${MESSAGE_TEXT:-}
       TTS_LANG: ${TTS_LANG:-es}
+      # Shared volume with Asterisk; the bot writes WAVs here and Asterisk
+      # reads them from /usr/share/asterisk/sounds/en/custom.
       SOUNDS_DIR: /sounds
       SOUND_NAME: ${SOUND_NAME:-piensa-aviso}
     volumes:

@@ -1,4 +1,5 @@
-"""Generate the IVR prompt as an 8 kHz mono WAV that Asterisk can play."""
+"""Audio helpers: convert any input to an 8 kHz mono WAV for Asterisk, and
+synthesize Spanish prompts via gTTS."""
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +7,7 @@ import hashlib
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 
 from gtts import gTTS
@@ -17,37 +19,50 @@ def _fingerprint(text: str, lang: str) -> str:
     return hashlib.sha256(f"{lang}\n{text}".encode("utf-8")).hexdigest()
 
 
-def _generate_sync(text: str, lang: str, out_wav: str) -> None:
-    """Synthesize ``text`` to ``out_wav`` (PCM s16le, 8000 Hz, mono)."""
+def _ffmpeg() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to convert audio for Asterisk")
+    return ffmpeg
+
+
+def to_asterisk_wav_sync(in_path: str, out_wav: str) -> None:
+    """Convert any audio file (mp3, ogg, m4a, wav…) to PCM s16le 8 kHz mono."""
     os.makedirs(os.path.dirname(out_wav), exist_ok=True)
-
     with tempfile.TemporaryDirectory() as tmp:
-        mp3_path = os.path.join(tmp, "tts.mp3")
-        gTTS(text=text, lang=lang).save(mp3_path)
-
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            raise RuntimeError("ffmpeg is required to convert TTS audio for Asterisk")
-
-        tmp_wav = os.path.join(tmp, "tts.wav")
+        tmp_wav = os.path.join(tmp, "out.wav")
         cmd = [
-            ffmpeg, "-y", "-loglevel", "error",
-            "-i", mp3_path,
+            _ffmpeg(), "-y", "-loglevel", "error",
+            "-i", in_path,
             "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le",
             tmp_wav,
         ]
-        import subprocess
-
         subprocess.run(cmd, check=True)
         shutil.move(tmp_wav, out_wav)
 
-    # Record the fingerprint so we can skip regeneration next time.
+
+async def to_asterisk_wav(in_path: str, out_wav: str) -> None:
+    await asyncio.to_thread(to_asterisk_wav_sync, in_path, out_wav)
+
+
+def _generate_sync(text: str, lang: str, out_wav: str) -> None:
+    """Synthesize ``text`` to ``out_wav`` (PCM s16le, 8000 Hz, mono)."""
+    os.makedirs(os.path.dirname(out_wav), exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        mp3_path = os.path.join(tmp, "tts.mp3")
+        gTTS(text=text, lang=lang).save(mp3_path)
+        to_asterisk_wav_sync(mp3_path, out_wav)
     with open(out_wav + ".sha", "w", encoding="utf-8") as fh:
         fh.write(_fingerprint(text, lang))
 
 
+async def synthesize(text: str, lang: str, out_wav: str) -> None:
+    """Generate a TTS prompt at ``out_wav`` (always regenerates)."""
+    await asyncio.to_thread(_generate_sync, text, lang, out_wav)
+
+
 async def ensure_prompt(text: str, lang: str, sounds_dir: str, sound_name: str) -> str:
-    """Make sure the prompt WAV exists and matches ``text``; return its path."""
+    """Make sure the default prompt WAV exists and matches ``text``; return its path."""
     out_wav = os.path.join(sounds_dir, f"{sound_name}.wav")
     fingerprint = _fingerprint(text, lang)
 

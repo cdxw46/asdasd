@@ -22,8 +22,9 @@ export SIP_EXTERNAL_IP="${SIP_EXTERNAL_IP:-}"
 render /etc/asterisk/templates/pjsip.conf.template /etc/asterisk/pjsip.conf
 render /etc/asterisk/templates/ari.conf.template   /etc/asterisk/ari.conf
 
-# Make sure runtime dirs exist.
-mkdir -p /var/run/asterisk /var/lib/asterisk/sounds/custom
+# Make sure runtime dirs exist. Custom sounds live under the data dir so that
+# `sound:custom/<name>` resolves (Debian Asterisk data dir = /usr/share/asterisk).
+mkdir -p /var/run/asterisk /usr/share/asterisk/sounds/en/custom
 chown -R root:root /var/run/asterisk || true
 
 echo "Starting Asterisk..."

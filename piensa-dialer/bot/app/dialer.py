@@ -16,6 +16,7 @@ from typing import Any
 
 from .ari import ARIClient, ARIError
 from .config import Config
+from .locuciones import LocutionStore
 from .numbers import dial_string
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class CallRecord:
     agent_channel_id: str | None = None
     bridge_id: str | None = None
     playback_id: str | None = None
+    agent_playback_id: str | None = None
     answered: bool = False
     transferred: bool = False
     finished: bool = False
@@ -120,12 +122,14 @@ class Campaign:
 
 
 class Dialer:
-    def __init__(self, ari: ARIClient, cfg: Config):
+    def __init__(self, ari: ARIClient, cfg: Config, locutions: LocutionStore):
         self.ari = ari
         self.cfg = cfg
+        self.locutions = locutions
         self._sem = asyncio.Semaphore(cfg.max_concurrent_calls)
         self._channels: dict[str, tuple[Campaign, CallRecord, str]] = {}
         self.active: Campaign | None = None
+        self.history: list[Campaign] = []
 
     # ----------------------------------------------------------------- campaign API
     @property
@@ -157,6 +161,8 @@ class Dialer:
         await asyncio.gather(*tasks, return_exceptions=True)
         campaign.completed = True
         campaign.notify()
+        self.history.append(campaign)
+        self.history = self.history[-20:]
         logger.info("Campaign %s finished", campaign.id)
 
     async def _run_call(self, campaign: Campaign, record: CallRecord) -> None:
@@ -259,8 +265,9 @@ class Dialer:
                 playback_id = f"pb-{record.channel_id}-{attempt}"
                 record.playback_id = playback_id
                 record.playback_done = asyncio.Event()
+                media = self.locutions.active_media("cliente", self.cfg.sound_media)
                 try:
-                    await self.ari.play(record.channel_id, self.cfg.sound_media, playback_id)
+                    await self.ari.play(record.channel_id, media, playback_id)
                 except ARIError as exc:
                     logger.warning("Playback failed on %s: %s", record.number, exc)
                     break
@@ -309,9 +316,13 @@ class Dialer:
     async def _on_PlaybackFinished(self, event: dict[str, Any]) -> None:
         playback = event.get("playback") or {}
         pb_id = playback.get("id")
-        for _campaign, record, kind in list(self._channels.values()):
-            if kind == "customer" and record.playback_id == pb_id:
+        for campaign, record, _kind in list(self._channels.values()):
+            if record.playback_id == pb_id:
                 record.playback_done.set()
+                return
+            if record.agent_playback_id == pb_id:
+                # Agent has heard the identification message -> bridge them in.
+                await self._bridge_agent(campaign, record)
                 return
 
     async def _transfer(self, campaign: Campaign, record: CallRecord) -> None:
@@ -352,6 +363,22 @@ class Dialer:
 
     async def _on_agent_answered(self, campaign: Campaign, record: CallRecord) -> None:
         if record.finished or not record.bridge_id:
+            return
+        # Optional identification message played privately to the agent before
+        # the customer is connected ("te paso una llamada de verificación…").
+        agent_media = self.locutions.active_media("agente")
+        if agent_media:
+            playback_id = f"agpb-{record.channel_id}"
+            record.agent_playback_id = playback_id
+            try:
+                await self.ari.play(record.agent_channel_id, agent_media, playback_id)
+                return  # bridging happens on PlaybackFinished
+            except ARIError as exc:
+                logger.warning("Agent greeting failed for %s: %s", record.number, exc)
+        await self._bridge_agent(campaign, record)
+
+    async def _bridge_agent(self, campaign: Campaign, record: CallRecord) -> None:
+        if record.finished or not record.bridge_id or not record.agent_channel_id:
             return
         try:
             await self.ari.add_to_bridge(record.bridge_id, record.agent_channel_id)

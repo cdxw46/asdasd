@@ -14,14 +14,27 @@ Telegram  ──►  Bot (Python)  ──ARI──►  Asterisk  ──SIP──
 
 ## Qué hace
 
+- Menú con botones (Llamar · Locuciones · Historial · Configuración).
 - Lista de números pegada en Telegram (uno por línea, comas o espacios).
 - Confirmación con botón antes de llamar.
 - Llamadas en paralelo con límite configurable (`MAX_CONCURRENT_CALLS`).
-- Mensaje de voz por TTS en español (se genera solo) o texto propio.
+- **Locuciones**: sube tus propios audios (MP3/OGG/M4A/nota de voz) o genera
+  la locución desde texto (TTS español). Eliges cuál suena al cliente.
+- **Locución de agente**: al transferir, antes de unir la llamada se reproduce
+  un audio de identificación al agente ("te paso una verificación…").
 - Captura del DTMF: al pulsar **1** se hace puente con el agente.
 - Mensaje de estado en vivo + informe final (contestó / pulsó 1 / no contesta /
-  comunica / fallida…).
+  comunica / fallida…) e historial de campañas.
 - Lista blanca opcional de usuarios de Telegram.
+
+### Locuciones (cómo subir un MP3)
+
+1. En el bot: menú → **🎙 Locuciones** → **➕ Subir MP3**.
+2. Envía el archivo de audio (puedes poner el nombre en el *caption*).
+3. Elige el rol: **Cliente** (lo que oye quien recibe la llamada) o **Agente**
+   (lo que oye tu equipo al recibir la transferencia).
+4. Se convierte a 8 kHz mono y queda activa. Puedes tener varias y cambiar la
+   activa con un toque. También **✍️ Desde texto** crea una locución por TTS.
 
 ## Estructura
 
@@ -38,10 +51,11 @@ piensa-dialer/
     ├── Dockerfile
     ├── requirements.txt
     └── app/
-        ├── main.py           # interfaz Telegram
+        ├── main.py           # interfaz Telegram (menú, locuciones, campañas)
         ├── dialer.py         # motor de campaña (estados de llamada)
         ├── ari.py            # cliente ARI async (REST + websocket)
-        ├── tts.py            # generación del mensaje de voz
+        ├── locuciones.py     # librería de locuciones (MP3/TTS + índice)
+        ├── tts.py            # conversión de audio + síntesis de voz
         ├── numbers.py        # parseo/normalización de números
         └── config.py
 ```
@@ -123,11 +137,11 @@ desactiva la regeneración borrando `MESSAGE_TEXT`.
 
 | Comando   | Acción                                  |
 |-----------|-----------------------------------------|
-| `/start`  | Ayuda y tu Telegram ID.                 |
-| `/config` | Configuración activa.                   |
+| `/start` `/menu` | Menú principal con botones.      |
 | `/status` | Progreso de la campaña actual.          |
 | `/stop`   | Cancela la campaña en curso.            |
 | *(texto)* | Pegar números → confirmar → llamar.     |
+| *(audio)* | Subir una locución (MP3/voz).           |
 
 ## Desarrollo / tests
 

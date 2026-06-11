@@ -7,3 +7,4 @@ venv/
 *.sha
 sounds/
 .pytest_cache/
+.env.local

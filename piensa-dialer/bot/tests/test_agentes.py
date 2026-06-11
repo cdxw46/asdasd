@@ -38,6 +38,11 @@ def test_create_render_provision_delete(tmp_path):
         xml = store.provisioning_xml(a, "1.2.3.4", transport=0)
         assert a.sip_user in xml and a.sip_password in xml and "1.2.3.4" in xml
 
+        # linphone provisioning XML (self-hosted QR)
+        lp = store.linphone_xml(a, "1.2.3.4", transport="udp")
+        assert "lpconfig.xsd" in lp and a.sip_user in lp and a.sip_password in lp
+        assert "transport=udp" in lp
+
         # lookup by token (used by the QR provisioning server)
         assert store.by_token(a.token).id == a.id
 

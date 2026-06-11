@@ -198,6 +198,38 @@ class AgentStore:
             logger.info("Seeded default agent %s", sip_user)
 
     # --------------------------------------------------------------- provisioning
+    def linphone_xml(self, agent: Agent, sip_domain: str, transport: str = "udp") -> str:
+        """Linphone remote-provisioning file (linphonerc as XML).
+
+        Linphone (Android/iOS/desktop) scans a QR pointing at this file and
+        configures the account automatically — fully self-hosted, no OEM.
+        """
+        proxy = f"&lt;sip:{escape(sip_domain)};transport={transport}&gt;"
+        identity = f"sip:{escape(agent.sip_user)}@{escape(sip_domain)}"
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<config xmlns="http://www.linphone.org/xsds/lpconfig.xsd"\n'
+            '        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
+            '        xsi:schemaLocation="http://www.linphone.org/xsds/lpconfig.xsd lpconfig.xsd">\n'
+            '  <section name="sip">\n'
+            '    <entry name="default_proxy">0</entry>\n'
+            '  </section>\n'
+            '  <section name="auth_info_0">\n'
+            f'    <entry name="username">{escape(agent.sip_user)}</entry>\n'
+            f'    <entry name="userid">{escape(agent.sip_user)}</entry>\n'
+            f'    <entry name="passwd">{escape(agent.sip_password)}</entry>\n'
+            f'    <entry name="domain">{escape(sip_domain)}</entry>\n'
+            '  </section>\n'
+            '  <section name="proxy_0">\n'
+            f'    <entry name="reg_proxy">{proxy}</entry>\n'
+            f'    <entry name="reg_identity">{identity}</entry>\n'
+            f'    <entry name="reg_expires">3600</entry>\n'
+            '    <entry name="reg_sendregister">1</entry>\n'
+            '    <entry name="publish">0</entry>\n'
+            '  </section>\n'
+            '</config>\n'
+        )
+
     def provisioning_xml(self, agent: Agent, sip_domain: str, transport: int = 0) -> str:
         """Zoiper5-compatible provisioning XML for one account.
 

@@ -64,11 +64,14 @@ class BotApp:
             return base.split("://")[-1].split(":")[0].split("/")[0]
         return "CAMBIA_ESTA_IP"
 
-    def _prov_url(self, token: str) -> str:
+    def _prov_base(self) -> str:
         base = self.cfg.provision_base_url
         if not base:
             base = f"http://{self._sip_host()}:{self.cfg.provision_port}"
-        return f"{base.rstrip('/')}/prov/{token}.xml"
+        return base.rstrip("/")
+
+    def _linphone_url(self, token: str) -> str:
+        return f"{self._prov_base()}/lp/{token}.xml"
 
     # ----------------------------------------------------------------- auth
     def _authorized(self, update: Update) -> bool:
@@ -371,16 +374,19 @@ class BotApp:
         if not agent:
             await context.bot.send_message(chat_id, "Ese agente ya no existe.")
             return
-        url = self._prov_url(agent.token)
+        url = self._linphone_url(agent.token)
         caption = (
             (f"✅ Agente «{html.escape(agent.name)}» creado.\n\n" if created else
              f"👤 Agente «{html.escape(agent.name)}»\n\n")
-            + "<b>Credenciales SIP</b> (Zoiper/PortSIP):\n"
-            f"• Servidor: <code>{html.escape(self._sip_host())}</code>\n"
+            + "<b>Datos SIP</b> (Zoiper / PortSIP — configúralos a mano):\n"
+            f"• Servidor / Dominio: <code>{html.escape(self._sip_host())}</code>\n"
             f"• Usuario: <code>{html.escape(agent.sip_user)}</code>\n"
             f"• Contraseña: <code>{html.escape(agent.sip_password)}</code>\n"
             "• Transporte: UDP\n\n"
-            "📲 O escanea el QR en Zoiper («Iniciar sesión con QR»):"
+            "📲 <b>QR para Linphone</b> (app gratuita): ábrela → «Scan QR Code» "
+            "y se configura solo.\n"
+            "<i>Nota: el QR nativo de Zoiper es solo para su plataforma OEM; "
+            "en Zoiper/PortSIP usa los datos de arriba.</i>"
         )
         png = qr.make_png(url)
         await context.bot.send_photo(chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML)

@@ -128,15 +128,23 @@ primero que descuelga se queda la llamada).
 Los agentes se gestionan **desde el bot** (menú → **👥 Agentes**):
 
 - **➕ Crear agente**: escribes un nombre y el bot crea un usuario SIP con
-  contraseña aleatoria, recarga Asterisk (vía AMI) y te devuelve un **QR**.
-- El agente abre Zoiper → «Iniciar sesión con QR» → escanea → queda
-  configurado solo (provisioning XML servido por el bot).
+  contraseña aleatoria, recarga Asterisk (vía AMI) y te devuelve los datos +
+  un **QR**.
 - **🗑** borra el agente (y recarga Asterisk).
 
-Para que el QR funcione, el móvil del agente debe poder alcanzar la URL de
-provisioning (`PROVISION_BASE_URL`, p. ej. `http://TU_IP:8090`); abre ese
-puerto en el firewall. Las credenciales también se muestran en texto por si se
-prefiere configurarlas a mano.
+**Sobre el QR — importante:**
+
+- El **QR nativo de Zoiper es solo de su plataforma OEM** (`oem.zoiper.com`,
+  requiere registrarse como proveedor); por eso un QR propio da «invalid QR
+  code» en Zoiper. En **Zoiper y PortSIP** se configuran con los **datos que
+  muestra el bot** (servidor, usuario, contraseña) — 30 segundos.
+- El **QR que genera el bot es para Linphone** (app gratuita iOS/Android/PC),
+  que **sí** soporta provisioning autohospedado: el agente abre Linphone →
+  «Scan QR Code» → se configura solo.
+
+Para que el QR de Linphone funcione, el móvil del agente debe poder alcanzar la
+URL de provisioning (`PROVISION_BASE_URL`, p. ej. `http://TU_IP:8090`); abre ese
+puerto en el firewall del servidor.
 
 Comprueba que un agente está registrado:
 

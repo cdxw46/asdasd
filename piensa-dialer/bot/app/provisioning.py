@@ -22,9 +22,8 @@ class ProvisioningServer:
         self.port = port
         self._runner: web.AppRunner | None = None
 
-    async def _handle(self, request: web.Request) -> web.Response:
-        token = request.match_info["token"]
-        agent = self.agents.by_token(token)
+    async def _handle_zoiper(self, request: web.Request) -> web.Response:
+        agent = self.agents.by_token(request.match_info["token"])
         if agent is None:
             return web.Response(status=404, text="not found")
         try:
@@ -32,7 +31,18 @@ class ProvisioningServer:
         except ValueError:
             transport = 0
         xml = self.agents.provisioning_xml(agent, self.sip_domain, transport)
-        logger.info("Provisioned agent %s via QR token", agent.sip_user)
+        logger.info("Provisioned (zoiper) agent %s", agent.sip_user)
+        return web.Response(text=xml, content_type="application/xml")
+
+    async def _handle_linphone(self, request: web.Request) -> web.Response:
+        agent = self.agents.by_token(request.match_info["token"])
+        if agent is None:
+            return web.Response(status=404, text="not found")
+        transport = request.query.get("t", "udp")
+        if transport not in ("udp", "tcp", "tls"):
+            transport = "udp"
+        xml = self.agents.linphone_xml(agent, self.sip_domain, transport)
+        logger.info("Provisioned (linphone) agent %s", agent.sip_user)
         return web.Response(text=xml, content_type="application/xml")
 
     async def _health(self, request: web.Request) -> web.Response:
@@ -40,8 +50,12 @@ class ProvisioningServer:
 
     async def start(self) -> None:
         app = web.Application()
-        app.router.add_get("/prov/{token}.xml", self._handle)
-        app.router.add_get("/prov/{token}", self._handle)
+        # Linphone remote provisioning (self-hosted QR).
+        app.router.add_get("/lp/{token}.xml", self._handle_linphone)
+        app.router.add_get("/lp/{token}", self._handle_linphone)
+        # Zoiper OEM token endpoint (only useful with a Zoiper provider_id).
+        app.router.add_get("/prov/{token}.xml", self._handle_zoiper)
+        app.router.add_get("/prov/{token}", self._handle_zoiper)
         app.router.add_get("/healthz", self._health)
         self._runner = web.AppRunner(app)
         await self._runner.setup()

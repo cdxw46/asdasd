@@ -1,0 +1,8 @@
+[general]
+enabled = yes
+pretty = yes
+allowed_origins = *
+
+[${ARI_USERNAME}]
+type = user
+password = ${ARI_PASSWORD}

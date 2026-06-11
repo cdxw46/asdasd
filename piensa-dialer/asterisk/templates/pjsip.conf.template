@@ -1,0 +1,80 @@
+;
+; PJSIP configuration for the Narayana SIP trunk.
+; This file is a template: ${VARS} are substituted at container start
+; (see docker-entrypoint.sh) from the environment / .env file.
+;
+; Outbound calls are placed against the endpoint "narayana-endpoint",
+; e.g. ARI originate -> PJSIP/34600111222@narayana-endpoint
+;
+
+[transport-udp]
+type = transport
+protocol = udp
+bind = 0.0.0.0:5060
+; If your trunk is behind NAT set SIP_EXTERNAL_IP and uncomment:
+; external_media_address = ${SIP_EXTERNAL_IP}
+; external_signaling_address = ${SIP_EXTERNAL_IP}
+
+;------------------------------------------------------------------------
+; Registration to Narayana
+;------------------------------------------------------------------------
+[narayana-reg]
+type = registration
+transport = transport-udp
+outbound_auth = narayana-auth
+server_uri = sip:${SIP_SERVER}
+client_uri = sip:${SIP_LOGIN}@${SIP_SERVER}
+contact_user = ${SIP_LOGIN}
+retry_interval = 60
+forbidden_retry_interval = 600
+fatal_retry_interval = 600
+expiration = 3600
+line = yes
+endpoint = narayana-endpoint
+
+[narayana-auth]
+type = auth
+auth_type = userpass
+username = ${SIP_LOGIN}
+password = ${SIP_PASSWORD}
+
+;------------------------------------------------------------------------
+; Endpoint used to place and receive calls on the trunk
+;------------------------------------------------------------------------
+[narayana-aor]
+type = aor
+contact = sip:${SIP_SERVER}
+qualify_frequency = 60
+
+[narayana-endpoint]
+type = endpoint
+transport = transport-udp
+context = from-trunk
+disallow = all
+allow = alaw,ulaw,g722
+outbound_auth = narayana-auth
+aors = narayana-aor
+from_user = ${SIP_LOGIN}
+from_domain = ${SIP_SERVER}
+callerid = ${CALLER_ID}
+send_rpid = yes
+direct_media = no
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+
+;------------------------------------------------------------------------
+; Trust calls coming from the Narayana server (inbound)
+;------------------------------------------------------------------------
+[narayana-identify]
+type = identify
+endpoint = narayana-endpoint
+match = ${SIP_SERVER}
+
+;------------------------------------------------------------------------
+; Agent softphones (Zoiper / PortSIP).
+; Agents are managed dynamically from the Telegram bot, which writes their
+; SIP accounts to the include below and reloads PJSIP via AMI. The first
+; agent is seeded from AGENT_SIP_USER / AGENT_SIP_PASSWORD.
+;------------------------------------------------------------------------
+#tryinclude agents/agents.conf
